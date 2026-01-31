@@ -5,12 +5,15 @@ set(OPENMATCH_SOURCES
 
 if(ENABLE_F14)
     list(APPEND OPENMATCH_SOURCES om_hash_f14.c)
-    target_compile_definitions(openmatch PRIVATE OM_USE_F14)
 else()
     list(APPEND OPENMATCH_SOURCES om_hash_khash.c)
 endif()
 
 add_library(openmatch ${OPENMATCH_SOURCES})
+
+if(ENABLE_F14)
+    target_compile_definitions(openmatch PRIVATE OM_USE_F14)
+endif()
 
 target_include_directories(openmatch
     PUBLIC
