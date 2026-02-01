@@ -42,21 +42,21 @@ OmSlabSlot *om_slot_from_idx(const OmDualSlab *slab, uint32_t idx) {
     return idx_to_slot_a(&slab->slab_a, idx);
 }
 
-int om_slab_init(OmDualSlab *slab, size_t user_data_size, uint32_t total_slots) {
-    if (!slab || total_slots == 0) {
+int om_slab_init(OmDualSlab *slab, const OmSlabConfig *config) {
+    if (!slab || !config || config->total_slots == 0) {
         return -1;
     }
 
     memset(slab, 0, sizeof(OmDualSlab));
-    slab->user_data_size = user_data_size;
+    slab->config = *config;
 
     /* Slot size = mandatory fields + queue nodes + user data */
-    size_t slot_size = sizeof(OmSlabSlot) + align_up(user_data_size, 8);
+    size_t slot_size = sizeof(OmSlabSlot) + align_up(config->user_data_size, 8);
     slab->slab_a.slot_size = slot_size;
-    slab->slab_a.capacity = total_slots;
+    slab->slab_a.capacity = config->total_slots;
     slab->slab_a.used = 0;
 
-    size_t total_a_size = slot_size * total_slots;
+    size_t total_a_size = slot_size * config->total_slots;
     slab->slab_a.memory = calloc(1, total_a_size);
     if (!slab->slab_a.memory) {
         return -1;
@@ -64,7 +64,7 @@ int om_slab_init(OmDualSlab *slab, size_t user_data_size, uint32_t total_slots) 
 
     /* Build free list - Q0 is reserved for internal slab use */
     slab->slab_a.free_list_idx = OM_SLOT_IDX_NULL;
-    for (uint32_t i = 0; i < total_slots; i++) {
+    for (uint32_t i = 0; i < config->total_slots; i++) {
         OmSlabSlot *slot = (OmSlabSlot *)(slab->slab_a.memory + i * slot_size);
         /* Initialize all queue nodes to NULL */
         for (int q = 0; q < OM_MAX_QUEUES; q++) {
@@ -77,17 +77,17 @@ int om_slab_init(OmDualSlab *slab, size_t user_data_size, uint32_t total_slots) 
     }
 
     /* Slab B: User-managed cold data - allocate same number of slots */
-    slab->slab_b.slot_size = align_up(user_data_size, 8);
+    slab->slab_b.slot_size = align_up(config->aux_data_size, 8);
     if (slab->slab_b.slot_size == 0) {
         slab->slab_b.slot_size = 8; /* Minimum size */
     }
-    slab->slab_b.slots_per_block = total_slots;
+    slab->slab_b.slots_per_block = config->total_slots;
     slab->slab_b.block_capacity = 1;
     slab->slab_b.block_count = 0;
     slab->slab_b.free_list_idx = OM_SLOT_IDX_NULL;
 
     /* Allocate one block for all aux slots */
-    size_t block_size = slab->slab_b.slot_size * total_slots;
+    size_t block_size = slab->slab_b.slot_size * config->total_slots;
     uint8_t *block = calloc(1, block_size);
     if (!block) {
         free(slab->slab_a.memory);
@@ -105,11 +105,11 @@ int om_slab_init(OmDualSlab *slab, size_t user_data_size, uint32_t total_slots) 
     slab->slab_b.block_count = 1;
     
     /* Build free list for aux slots */
-    for (uint32_t i = 0; i < total_slots; i++) {
+    for (uint32_t i = 0; i < config->total_slots; i++) {
         uint32_t *next_ptr = (uint32_t *)(block + i * slab->slab_b.slot_size);
         *next_ptr = (i == 0) ? OM_SLOT_IDX_NULL : (i - 1);
     }
-    slab->slab_b.free_list_idx = total_slots - 1;
+    slab->slab_b.free_list_idx = config->total_slots - 1;
 
     return 0;
 }

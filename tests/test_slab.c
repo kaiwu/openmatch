@@ -6,9 +6,10 @@
 START_TEST(test_slab_init)
 {
     OmDualSlab slab;
-    int ret = om_slab_init(&slab, sizeof(uint64_t), 64);
+    OmSlabConfig config = {sizeof(uint64_t), sizeof(uint64_t), 64};
+    int ret = om_slab_init(&slab, &config);
     ck_assert_int_eq(ret, 0);
-    ck_assert_int_eq(slab.user_data_size, sizeof(uint64_t));
+    ck_assert_int_eq(slab.config.user_data_size, sizeof(uint64_t));
     
     om_slab_destroy(&slab);
 }
@@ -19,13 +20,15 @@ START_TEST(test_slab_init_invalid)
     OmDualSlab slab;
     
     // NULL slab pointer
-    int ret = om_slab_init(NULL, sizeof(uint64_t), 64);
+    OmSlabConfig config1 = {sizeof(uint64_t), sizeof(uint64_t), 64};
+    int ret = om_slab_init(NULL, &config1);
     ck_assert_int_eq(ret, -1);
     
     // Zero user_data_size is now valid (no user payload)
-    ret = om_slab_init(&slab, 0, 64);
+    OmSlabConfig config2 = {0, 0, 64};
+    ret = om_slab_init(&slab, &config2);
     ck_assert_int_eq(ret, 0);
-    ck_assert_int_eq(slab.user_data_size, 0);
+    ck_assert_int_eq(slab.config.user_data_size, 0);
     om_slab_destroy(&slab);
 }
 END_TEST
@@ -33,7 +36,8 @@ END_TEST
 START_TEST(test_slab_alloc_free)
 {
     OmDualSlab slab;
-    om_slab_init(&slab, sizeof(uint64_t), 64);
+    OmSlabConfig config = {sizeof(uint64_t), sizeof(uint64_t), 64};
+    om_slab_init(&slab, &config);
     
     // Allocate a slot
     OmSlabSlot *slot = om_slab_alloc(&slab);
@@ -57,7 +61,8 @@ END_TEST
 START_TEST(test_slab_alloc_many)
 {
     OmDualSlab slab;
-    om_slab_init(&slab, sizeof(uint32_t), 64);
+    OmSlabConfig config = {sizeof(uint32_t), sizeof(uint32_t), 64};
+    om_slab_init(&slab, &config);
     
     // Allocate all fixed slab slots (slab B is for aux data only)
     OmSlabSlot *slots[OM_SLAB_A_SIZE];
@@ -97,7 +102,8 @@ START_TEST(test_slab_null_handling)
     
     // NULL slot free (should not crash)
     OmDualSlab slab;
-    om_slab_init(&slab, sizeof(int), 64);
+    OmSlabConfig config = {sizeof(int), sizeof(int), 64};
+    om_slab_init(&slab, &config);
     om_slab_free(&slab, NULL);
     
     // NULL slot data
@@ -111,7 +117,8 @@ END_TEST
 START_TEST(test_mandatory_fields)
 {
     OmDualSlab slab;
-    om_slab_init(&slab, sizeof(uint64_t), 64);
+    OmSlabConfig config = {sizeof(uint64_t), sizeof(uint64_t), 64};
+    om_slab_init(&slab, &config);
     
     OmSlabSlot *slot = om_slab_alloc(&slab);
     ck_assert_ptr_nonnull(slot);
@@ -145,7 +152,8 @@ END_TEST
 START_TEST(test_alloc_clears_mandatory_fields)
 {
     OmDualSlab slab;
-    om_slab_init(&slab, 0, 64);  // No user data
+    OmSlabConfig config = {0, 0, 64};  // No user data
+    om_slab_init(&slab, &config);
     
     OmSlabSlot *slot = om_slab_alloc(&slab);
     ck_assert_ptr_nonnull(slot);

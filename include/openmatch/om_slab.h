@@ -95,11 +95,17 @@ typedef struct OmSlabB {
     uint32_t free_list_idx;  /**< Index of first free slot (block-major format) */
 } OmSlabB;
 
+/* Slab configuration structure */
+typedef struct OmSlabConfig {
+    size_t user_data_size;   /**< Size of secondary hot data in fixed slab */
+    size_t aux_data_size;    /**< Size of cold data in aux slab */
+    uint32_t total_slots;    /**< Total slots in both slabs (must be > 0) */
+} OmSlabConfig;
+
 typedef struct OmDualSlab {
     OmSlabA slab_a;          /**< Fixed slab with mandatory fields + queues */
     OmSlabB slab_b;          /**< Aux slab for user cold data only */
-    size_t split_threshold;
-    size_t user_data_size;   /**< Size of user-defined payload per slot */
+    OmSlabConfig config;     /**< Configuration (copied at init) */
 } OmDualSlab;
 
 /* Product book structure - array indexed by product_id (0 to 65535)
@@ -118,7 +124,7 @@ typedef struct OmProductBook {
 
 #define OM_MAX_PRODUCTS 65536  /**< Maximum number of products (uint16_t max) */
 
-int om_slab_init(OmDualSlab *slab, size_t user_data_size, uint32_t total_slots);
+int om_slab_init(OmDualSlab *slab, const OmSlabConfig *config);
 void om_slab_destroy(OmDualSlab *slab);
 
 OmSlabSlot *om_slab_alloc(OmDualSlab *slab);
