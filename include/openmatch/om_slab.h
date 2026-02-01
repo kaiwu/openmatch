@@ -118,7 +118,7 @@ typedef struct OmProductBook {
 
 #define OM_MAX_PRODUCTS 65536  /**< Maximum number of products (uint16_t max) */
 
-int om_slab_init(OmDualSlab *slab, size_t user_data_size);
+int om_slab_init(OmDualSlab *slab, size_t user_data_size, uint32_t total_slots);
 void om_slab_destroy(OmDualSlab *slab);
 
 OmSlabSlot *om_slab_alloc(OmDualSlab *slab);
