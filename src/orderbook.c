@@ -23,7 +23,10 @@ int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struc
     }
 
     ctx->next_slot_idx = 0;
-    ctx->wal = wal;  /* Store WAL pointer (can be NULL) */
+    ctx->wal = wal;
+    if (wal) {
+        om_wal_set_slab(wal, &ctx->slab);
+    }
     return 0;
 }
 
@@ -415,7 +418,17 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
 
     /* Initialize WAL replay iterator */
     OmWalReplay replay;
-    if (om_wal_replay_init(&replay, wal_filename) != 0) {
+    OmWalConfig replay_config = {
+        .filename = wal_filename,
+        .buffer_size = 0,
+        .sync_interval_ms = 0,
+        .use_direct_io = false,
+        .enable_crc32 = ctx->wal ? ctx->wal->config.enable_crc32 : false,
+        .user_data_size = ctx->slab.config.user_data_size,
+        .aux_data_size = ctx->slab.config.aux_data_size
+    };
+
+    if (om_wal_replay_init_with_config(&replay, wal_filename, &replay_config) != 0) {
         return -1;  /* WAL file doesn't exist or can't be opened */
     }
 
@@ -425,50 +438,46 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
     uint64_t sequence;
     size_t data_len;
 
-    while (om_wal_replay_next(&replay, &type, &data, &sequence, &data_len) == 1) {
+    int replay_status = 0;
+    while ((replay_status = om_wal_replay_next(&replay, &type, &data, &sequence, &data_len)) == 1) {
         switch (type) {
             case OM_WAL_INSERT: {
-                /* Variable length record: sizeof(OmWalInsert) + user_data_size + aux_data_size */
                 if (data_len < sizeof(OmWalInsert)) {
-                    continue;  /* Corrupted record - too small */
+                    continue;
                 }
-                OmWalInsert *rec = (OmWalInsert *)data;
                 
-                /* Allocate slot - will get a new slot_idx */
+                OmWalInsert rec;
+                memcpy(&rec, data, sizeof(OmWalInsert));
+                
                 OmSlabSlot *slot = om_slab_alloc(&ctx->slab);
                 if (!slot) {
                     om_wal_replay_close(&replay);
-                    return -1;  /* Out of memory */
+                    return -1;
                 }
                 
-                /* Restore order data */
-                slot->order_id = rec->order_id;
-                slot->price = rec->price;
-                slot->volume = rec->volume;
-                slot->volume_remain = rec->vol_remain;
-                slot->org = rec->org;
-                slot->flags = rec->flags;
+                slot->order_id = rec.order_id;
+                slot->price = rec.price;
+                slot->volume = rec.volume;
+                slot->volume_remain = rec.vol_remain;
+                slot->org = rec.org;
+                slot->flags = rec.flags;
                 
-                /* Copy user_data and aux_data from WAL record to slot */
-                if (rec->user_data_size > 0 || rec->aux_data_size > 0) {
+                if (rec.user_data_size > 0 || rec.aux_data_size > 0) {
                     uint8_t *user_data_src = (uint8_t *)data + sizeof(OmWalInsert);
-                    uint8_t *aux_data_src = user_data_src + rec->user_data_size;
+                    uint8_t *aux_data_src = user_data_src + rec.user_data_size;
                     
-                    /* Copy user_data to slot */
-                    if (rec->user_data_size > 0) {
+                    if (rec.user_data_size > 0) {
                         void *user_data = om_slot_get_data(slot);
-                        memcpy(user_data, user_data_src, rec->user_data_size);
+                        memcpy(user_data, user_data_src, rec.user_data_size);
                     }
                     
-                    /* Copy aux_data to slot */
-                    if (rec->aux_data_size > 0) {
+                    if (rec.aux_data_size > 0) {
                         void *aux_data = om_slot_get_aux_data(&ctx->slab, slot);
-                        memcpy(aux_data, aux_data_src, rec->aux_data_size);
+                        memcpy(aux_data, aux_data_src, rec.aux_data_size);
                     }
                 }
                 
-                /* Add to orderbook - this adds to price ladder, hashmap, etc. */
-                if (om_orderbook_insert(ctx, rec->product_id, slot) != 0) {
+                if (om_orderbook_insert(ctx, rec.product_id, slot) != 0) {
                     om_slab_free(&ctx->slab, slot);
                     om_wal_replay_close(&replay);
                     return -1;
@@ -485,10 +494,10 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
                 if (data_len != sizeof(OmWalCancel)) {
                     continue;
                 }
-                OmWalCancel *rec = (OmWalCancel *)data;
+                OmWalCancel rec;
+                memcpy(&rec, data, sizeof(OmWalCancel));
                 
-                /* Cancel the order - this removes from price ladder, hashmap, frees slot */
-                om_orderbook_cancel(ctx, rec->order_id);
+                om_orderbook_cancel(ctx, rec.order_id);
                 
                 if (stats) {
                     stats->records_cancel++;
@@ -501,18 +510,17 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
                 if (data_len != sizeof(OmWalMatch)) {
                     continue;
                 }
-                OmWalMatch *rec = (OmWalMatch *)data;
+                OmWalMatch rec;
+                memcpy(&rec, data, sizeof(OmWalMatch));
                 
-                /* Look up maker order */
-                OmOrderEntry *entry = om_hash_get(ctx->order_hashmap, rec->maker_id);
+                OmOrderEntry *entry = om_hash_get(ctx->order_hashmap, rec.maker_id);
                 if (entry) {
                     OmSlabSlot *slot = om_slot_from_idx(&ctx->slab, entry->slot_idx);
-                    if (slot && slot->volume_remain >= rec->volume) {
-                        slot->volume_remain -= rec->volume;
+                    if (slot && slot->volume_remain >= rec.volume) {
+                        slot->volume_remain -= rec.volume;
                         
-                        /* If fully filled, remove order */
                         if (slot->volume_remain == 0) {
-                            om_orderbook_cancel(ctx, rec->maker_id);
+                            om_orderbook_cancel(ctx, rec.maker_id);
                         }
                     }
                 }
@@ -535,6 +543,11 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
         if (stats) {
             stats->bytes_processed += sizeof(OmWalHeader) + data_len;
         }
+    }
+
+    if (replay_status < 0) {
+        om_wal_replay_close(&replay);
+        return -1;
     }
 
     om_wal_replay_close(&replay);

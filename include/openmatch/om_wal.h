@@ -92,6 +92,9 @@ typedef struct OmWalConfig {
     size_t aux_data_size;       /* Size of cold data (from OmSlabConfig.aux_data_size) */
 } OmWalConfig;
 
+/* Forward declaration for slab */
+struct OmDualSlab;
+
 /* WAL context */
 typedef struct OmWal {
     int fd;                     /* File descriptor (O_DIRECT if enabled) */
@@ -102,6 +105,7 @@ typedef struct OmWal {
     uint64_t sequence;          /* Next sequence number */
     uint64_t file_offset;       /* Current file offset */
     OmWalConfig config;         /* Configuration copy with data sizes */
+    struct OmDualSlab *slab;    /* Slab pointer for aux data access (can be NULL) */
 } OmWal;
 
 /* Initialize WAL with high-performance settings */
@@ -109,6 +113,14 @@ int om_wal_init(OmWal *wal, const OmWalConfig *config);
 
 /* Close WAL and free resources */
 void om_wal_close(OmWal *wal);
+
+/**
+ * Set slab pointer for aux data access during insert logging.
+ * Must be called after om_wal_init and before om_wal_insert if aux_data_size > 0.
+ * @param wal WAL context
+ * @param slab Dual slab pointer (can be NULL to disable aux data logging)
+ */
+void om_wal_set_slab(OmWal *wal, struct OmDualSlab *slab);
 
 /* Write operations - all return sequence number on success, 0 on failure */
 /* These are FAST PATH - just append to buffer, no syscalls, no locks */
@@ -174,16 +186,25 @@ typedef struct OmWalReplay {
     /* Data sizes from WAL config - needed for parsing insert records */
     size_t user_data_size;
     size_t aux_data_size;
+    bool enable_crc32;          /* Whether to validate CRC32 on replay */
 } OmWalReplay;
 
 /* Initialize replay iterator for reading WAL file */
 int om_wal_replay_init(OmWalReplay *replay, const char *filename);
 
+/* Initialize replay with data sizes (needed for parsing INSERT records) */
+int om_wal_replay_init_with_sizes(OmWalReplay *replay, const char *filename,
+                                  size_t user_data_size, size_t aux_data_size);
+
+/* Initialize replay with full config (needed for CRC32 validation and data sizes) */
+int om_wal_replay_init_with_config(OmWalReplay *replay, const char *filename,
+                                    const OmWalConfig *config);
+
 /* Close replay iterator */
 void om_wal_replay_close(OmWalReplay *replay);
 
 /* Read next record from WAL during replay */
-/* Returns: 1 = success, 0 = EOF, -1 = error */
+/* Returns: 1 = success, 0 = EOF, -1 = error, -2 = CRC mismatch */
 /* For INSERT records, data_len includes both header + user_data + aux_data */
 int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data, 
                        uint64_t *sequence, size_t *data_len);

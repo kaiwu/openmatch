@@ -4,6 +4,7 @@ set(TEST_SOURCES
     test_runner.c
     test_slab.c
     test_orderbook.c
+    test_wal.c
 )
 
 add_executable(test_runner ${TEST_SOURCES})

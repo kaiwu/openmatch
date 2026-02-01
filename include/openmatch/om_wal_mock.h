@@ -21,8 +21,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Forward declaration - defined in om_slab.h */
-struct OmSlabSlot;
+#include "om_slab.h"
 
 /* ============================================================================
  * Types - Mirror of om_wal.h exactly
@@ -117,6 +116,12 @@ int om_wal_mock_init(OmWal *wal, const OmWalConfig *config);
 /* Close mock WAL - prints summary */
 void om_wal_mock_close(OmWal *wal);
 
+/* Set slab pointer for aux data access (mock no-op) */
+static inline void om_wal_mock_set_slab(OmWal *wal, OmDualSlab *slab) {
+    (void)wal;
+    (void)slab;
+}
+
 /* Log insert - prints INSERT operation to stderr */
 uint64_t om_wal_mock_insert(OmWal *wal, struct OmSlabSlot *slot, uint16_t product_id);
 
@@ -147,6 +152,10 @@ static inline uint16_t om_wal_mock_header_len(uint64_t packed) { return packed &
 
 /* Replay functions - mock returns EOF immediately */
 int om_wal_mock_replay_init(OmWalReplay *replay, const char *filename);
+int om_wal_mock_replay_init_with_sizes(OmWalReplay *replay, const char *filename,
+                                       size_t user_data_size, size_t aux_data_size);
+int om_wal_mock_replay_init_with_config(OmWalReplay *replay, const char *filename,
+                                        const OmWalConfig *config);
 void om_wal_mock_replay_close(OmWalReplay *replay);
 int om_wal_mock_replay_next(OmWalReplay *replay, OmWalType *type, void **data, 
                             uint64_t *sequence, size_t *data_len);
@@ -163,6 +172,7 @@ int om_wal_mock_recover_from_wal(struct OmOrderbookContext *ctx,
 /* These aliases allow you to swap between mock and real by changing include */
 #define om_wal_init         om_wal_mock_init
 #define om_wal_close        om_wal_mock_close
+#define om_wal_set_slab     om_wal_mock_set_slab
 #define om_wal_insert       om_wal_mock_insert
 #define om_wal_cancel       om_wal_mock_cancel
 #define om_wal_match        om_wal_mock_match
@@ -174,6 +184,8 @@ int om_wal_mock_recover_from_wal(struct OmOrderbookContext *ctx,
 #define om_wal_header_type  om_wal_mock_header_type
 #define om_wal_header_len   om_wal_mock_header_len
 #define om_wal_replay_init      om_wal_mock_replay_init
+#define om_wal_replay_init_with_sizes om_wal_mock_replay_init_with_sizes
+#define om_wal_replay_init_with_config om_wal_mock_replay_init_with_config
 #define om_wal_replay_close     om_wal_mock_replay_close
 #define om_wal_replay_next      om_wal_mock_replay_next
 #define om_orderbook_recover_from_wal om_wal_mock_recover_from_wal
