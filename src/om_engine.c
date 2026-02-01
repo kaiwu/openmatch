@@ -195,7 +195,7 @@ static int match_order(OmEngine *engine, OmProductBook *book, OmOrder *order,
         if (order->side == OM_SIDE_ASK && best_price < order->price) break;
 
         while (order->remaining > 0 && (results == NULL || *result_count < max_results) && !om_queue_is_empty(&best_level->orders)) {
-            OmSlabSlot *maker_slot = om_queue_pop(&best_level->orders, 0);
+            OmSlabSlot *maker_slot = om_queue_pop(&best_level->orders, &book->order_slab, 0);
             if (!maker_slot) break;
 
             OmOrder *maker = (OmOrder *)om_slot_get_data(maker_slot);
@@ -215,7 +215,7 @@ static int match_order(OmEngine *engine, OmProductBook *book, OmOrder *order,
             maker->remaining -= match_qty;
 
             if (maker->remaining > 0) {
-                om_queue_push(&best_level->orders, maker_slot, 0);
+                om_queue_push(&best_level->orders, &book->order_slab, maker_slot, 0);
             } else {
                 om_slab_free(&book->order_slab, maker_slot);
             }
@@ -263,7 +263,7 @@ int om_engine_place_order(OmEngine *engine, uint64_t product_id, OmOrder *order,
             memcpy(stored, order, sizeof(OmOrder));
             stored->slot = slot;
 
-            om_queue_push(&level->orders, slot, 0);
+            om_queue_push(&level->orders, &book->order_slab, slot, 0);
         }
     }
 
