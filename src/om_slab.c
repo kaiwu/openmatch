@@ -15,30 +15,19 @@ static inline OmSlabSlot *idx_to_slot_a(const OmSlabA *slab_a, uint32_t idx) {
 
 /* Helper: Get index from slot pointer for slab A */
 static inline uint32_t slot_to_idx_a(const OmSlabA *slab_a, const OmSlabSlot *slot) {
-    if (!slot || !slab_a->memory) return OM_SLOT_IDX_NULL;
     ptrdiff_t offset = (const uint8_t *)slot - slab_a->memory;
     if (offset < 0 || offset % slab_a->slot_size != 0) return OM_SLOT_IDX_NULL;
     return (uint32_t)(offset / slab_a->slot_size);
 }
 
-/* Helper: Check if slot is in slab A */
-static inline bool slot_in_slab_a(const OmDualSlab *slab, const OmSlabSlot *slot) {
-    if (!slab || !slot || !slab->slab_a.memory) return false;
-    const uint8_t *slot_addr = (const uint8_t *)slot;
-    const uint8_t *a_start = slab->slab_a.memory;
-    const uint8_t *a_end = a_start + (slab->slab_a.slot_size * slab->slab_a.capacity);
-    return slot_addr >= a_start && slot_addr < a_end;
-}
-
 /* Get slot index within slab A */
 uint32_t om_slot_get_idx(const OmDualSlab *slab, const OmSlabSlot *slot) {
-    if (!slab || !slot) return OM_SLOT_IDX_NULL;
     return slot_to_idx_a(&slab->slab_a, slot);
 }
 
 /* Get slot from index in slab A */
 OmSlabSlot *om_slot_from_idx(const OmDualSlab *slab, uint32_t idx) {
-    if (!slab || idx == OM_SLOT_IDX_NULL) return NULL;
+    if (idx == OM_SLOT_IDX_NULL) return NULL;
     return idx_to_slot_a(&slab->slab_a, idx);
 }
 
@@ -110,13 +99,14 @@ int om_slab_init(OmDualSlab *slab, const OmSlabConfig *config) {
         *next_ptr = (i == 0) ? OM_SLOT_IDX_NULL : (i - 1);
     }
     slab->slab_b.free_list_idx = config->total_slots - 1;
+    
+    /* Initialize order ID counter */
+    slab->next_order_id = 1;
 
     return 0;
 }
 
 void om_slab_destroy(OmDualSlab *slab) {
-    if (!slab) return;
-
     free(slab->slab_a.memory);
 
     for (size_t i = 0; i < slab->slab_b.block_count; i++) {
@@ -127,192 +117,82 @@ void om_slab_destroy(OmDualSlab *slab) {
     memset(slab, 0, sizeof(OmDualSlab));
 }
 
-static OmSlabSlot *slab_a_alloc(OmSlabA *slab_a) {
-    if (slab_a->free_list_idx == OM_SLOT_IDX_NULL) {
+OmSlabSlot *om_slab_alloc(OmDualSlab *slab) {
+    /* Check if we have free slots in fixed slab */
+    if (slab->slab_a.free_list_idx == OM_SLOT_IDX_NULL) {
         return NULL;
     }
-
-    uint32_t slot_idx = slab_a->free_list_idx;
-    OmSlabSlot *slot = idx_to_slot_a(slab_a, slot_idx);
-    slab_a->free_list_idx = slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx;
-
-    /* Clear mandatory fields and queue nodes */
+    
+    /* Get index from fixed slab free list */
+    uint32_t idx = slab->slab_a.free_list_idx;
+    OmSlabSlot *slot = idx_to_slot_a(&slab->slab_a, idx);
+    if (!slot) return NULL;
+    
+    /* Update fixed slab free list */
+    slab->slab_a.free_list_idx = slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx;
+    
+    /* Check and update aux slab free list */
+    if (slab->slab_b.free_list_idx == OM_SLOT_IDX_NULL) {
+        /* No aux slot available, put fixed slot back */
+        slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx = slab->slab_a.free_list_idx;
+        slab->slab_a.free_list_idx = idx;
+        return NULL;
+    }
+    
+    /* Verify we got matching index (should always match with proper init) */
+    if (slab->slab_b.free_list_idx != idx) {
+        /* This shouldn't happen if both slabs are in sync */
+        /* Put fixed slot back */
+        slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx = slab->slab_a.free_list_idx;
+        slab->slab_a.free_list_idx = idx;
+        return NULL;
+    }
+    
+    /* Update aux slab free list */
+    uint8_t *aux_block = slab->slab_b.blocks[0];
+    uint32_t *aux_next = (uint32_t *)(aux_block + idx * slab->slab_b.slot_size);
+    slab->slab_b.free_list_idx = *aux_next;
+    
+    /* Clear both slots */
     slot->price = 0;
     slot->volume = 0;
     slot->volume_remain = 0;
     slot->org = 0;
     slot->flags = 0;
-    slot->parent_idx = OM_SLOT_IDX_NULL;
+    slot->order_id = OM_SLOT_IDX_NULL;
     for (int q = 0; q < OM_MAX_QUEUES; q++) {
         slot->queue_nodes[q].next_idx = OM_SLOT_IDX_NULL;
         slot->queue_nodes[q].prev_idx = OM_SLOT_IDX_NULL;
     }
-    slab_a->used++;
+    
+    /* Clear aux slot */
+    memset(aux_block + idx * slab->slab_b.slot_size, 0, slab->slab_b.slot_size);
+    
+    slab->slab_a.used++;
     return slot;
-}
-
-static void slab_a_free(OmSlabA *slab_a, OmSlabSlot *slot) {
-    if (!slab_a || !slot) return;
-
-    uint32_t slot_idx = slot_to_idx_a(slab_a, slot);
-    if (slot_idx == OM_SLOT_IDX_NULL) return;
-
-    /* Clear queue nodes and add to free list (Q0 reserved for internal use) */
-    for (int q = 0; q < OM_MAX_QUEUES; q++) {
-        slot->queue_nodes[q].next_idx = OM_SLOT_IDX_NULL;
-        slot->queue_nodes[q].prev_idx = OM_SLOT_IDX_NULL;
-    }
-    slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx = slab_a->free_list_idx;
-    slab_a->free_list_idx = slot_idx;
-    slab_a->used--;
-}
-
-static int slab_b_grow(OmSlabB *slab_b) {
-    if (slab_b->block_count >= slab_b->block_capacity) {
-        size_t new_capacity = slab_b->block_capacity * 2;
-        uint8_t **new_blocks = realloc(slab_b->blocks, new_capacity * sizeof(uint8_t *));
-        if (!new_blocks) return -1;
-        slab_b->blocks = new_blocks;
-        slab_b->block_capacity = new_capacity;
-    }
-
-    size_t block_size = slab_b->slot_size * slab_b->slots_per_block;
-    uint8_t *block = calloc(1, block_size);
-    if (!block) return -1;
-
-    uint32_t base_idx = (uint32_t)(slab_b->block_count * slab_b->slots_per_block);
-    slab_b->blocks[slab_b->block_count++] = block;
-
-    /* Add all slots to free list (block-major index: block * slots_per_block + slot) */
-    for (size_t i = 0; i < slab_b->slots_per_block; i++) {
-        uint32_t *next_ptr = (uint32_t *)(block + i * slab_b->slot_size);
-        *next_ptr = slab_b->free_list_idx;
-        slab_b->free_list_idx = base_idx + (uint32_t)i;
-    }
-
-    return 0;
-}
-
-static void *slab_b_alloc(OmDualSlab *slab) {
-    OmSlabB *slab_b = &slab->slab_b;
-    
-    if (slab_b->free_list_idx == OM_SLOT_IDX_NULL) {
-        if (slab_b_grow(slab_b) != 0) {
-            return NULL;
-        }
-    }
-
-    uint32_t idx = slab_b->free_list_idx;
-    size_t block = idx / slab_b->slots_per_block;
-    size_t block_idx = idx % slab_b->slots_per_block;
-    
-    if (block >= slab_b->block_count) return NULL;
-    
-    uint8_t *slot = slab_b->blocks[block] + block_idx * slab_b->slot_size;
-    slab_b->free_list_idx = *(uint32_t *)slot;
-    
-    /* Clear the slot */
-    memset(slot, 0, slab_b->slot_size);
-    return slot;
-}
-
-static void slab_b_free(OmDualSlab *slab, void *aux_data) {
-    if (!slab || !aux_data) return;
-
-    OmSlabB *slab_b = &slab->slab_b;
-    
-    /* Find which block contains this pointer */
-    for (size_t block = 0; block < slab_b->block_count; block++) {
-        uint8_t *block_start = slab_b->blocks[block];
-        uint8_t *block_end = block_start + (slab_b->slot_size * slab_b->slots_per_block);
-        
-        if ((uint8_t *)aux_data >= block_start && (uint8_t *)aux_data < block_end) {
-            ptrdiff_t offset = (uint8_t *)aux_data - block_start;
-            if (offset % slab_b->slot_size != 0) return; /* Not aligned */
-            
-            uint32_t idx = (uint32_t)(offset / slab_b->slot_size);
-            uint32_t global_idx = (uint32_t)(block * slab_b->slots_per_block + idx);
-            
-            /* Add to free list */
-            *(uint32_t *)aux_data = slab_b->free_list_idx;
-            slab_b->free_list_idx = global_idx;
-            return;
-        }
-    }
-}
-
-OmSlabSlot *om_slab_alloc(OmDualSlab *slab) {
-    if (!slab) return NULL;
-    return slab_a_alloc(&slab->slab_a);
 }
 
 void om_slab_free(OmDualSlab *slab, OmSlabSlot *slot) {
-    if (!slab || !slot) return;
-    slab_a_free(&slab->slab_a, slot);
+    uint32_t slot_idx = slot_to_idx_a(&slab->slab_a, slot);
+    if (slot_idx == OM_SLOT_IDX_NULL) return;
+    
+    /* Clear fixed slot and add to free list */
+    for (int q = 0; q < OM_MAX_QUEUES; q++) {
+        slot->queue_nodes[q].next_idx = OM_SLOT_IDX_NULL;
+        slot->queue_nodes[q].prev_idx = OM_SLOT_IDX_NULL;
+    }
+    slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx = slab->slab_a.free_list_idx;
+    slab->slab_a.free_list_idx = slot_idx;
+    slab->slab_a.used--;
+    
+    /* Clear aux slot and add to free list */
+    uint8_t *aux_block = slab->slab_b.blocks[0];
+    uint32_t *aux_next = (uint32_t *)(aux_block + slot_idx * slab->slab_b.slot_size);
+    *aux_next = slab->slab_b.free_list_idx;
+    slab->slab_b.free_list_idx = slot_idx;
 }
 
-void *om_slab_alloc_aux(OmDualSlab *slab, OmSlabSlot **parent_slot) {
-    if (!slab) return NULL;
-    (void)parent_slot; /* Reserved for future use (e.g., linking aux to parent) */
-    return slab_b_alloc(slab);
-}
-
-void om_slab_free_aux(OmDualSlab *slab, void *aux_data) {
-    if (!slab || !aux_data) return;
-    slab_b_free(slab, aux_data);
-}
-
-void *om_slot_get_data(OmSlabSlot *slot) {
-    if (!slot) return NULL;
-    return slot->data;
-}
-
-/* Mandatory field getters */
-uint64_t om_slot_get_price(const OmSlabSlot *slot) {
-    return slot->price;
-}
-
-uint64_t om_slot_get_volume(const OmSlabSlot *slot) {
-    return slot->volume;
-}
-
-uint64_t om_slot_get_volume_remain(const OmSlabSlot *slot) {
-    return slot->volume_remain;
-}
-
-uint16_t om_slot_get_org(const OmSlabSlot *slot) {
-    return slot->org;
-}
-
-uint16_t om_slot_get_flags(const OmSlabSlot *slot) {
-    return slot->flags;
-}
-
-uint32_t om_slot_get_parent_idx(const OmSlabSlot *slot) {
-    return slot->parent_idx;
-}
-
-/* Mandatory field setters */
-void om_slot_set_price(OmSlabSlot *slot, uint64_t price) {
-    slot->price = price;
-}
-
-void om_slot_set_volume(OmSlabSlot *slot, uint64_t volume) {
-    slot->volume = volume;
-}
-
-void om_slot_set_volume_remain(OmSlabSlot *slot, uint64_t volume_remain) {
-    slot->volume_remain = volume_remain;
-}
-
-void om_slot_set_org(OmSlabSlot *slot, uint16_t org) {
-    slot->org = org;
-}
-
-void om_slot_set_flags(OmSlabSlot *slot, uint16_t flags) {
-    slot->flags = flags;
-}
-
-void om_slot_set_parent_idx(OmSlabSlot *slot, uint32_t parent_idx) {
-    slot->parent_idx = parent_idx;
+/* Generate next unique order ID (auto-increment, starts at 1) */
+uint32_t om_slab_next_order_id(OmDualSlab *slab) {
+    return slab->next_order_id++;
 }

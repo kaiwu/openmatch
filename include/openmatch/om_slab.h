@@ -69,7 +69,7 @@ typedef struct OmSlabSlot {
     uint64_t volume_remain;  /**< Remaining volume to fill */
     uint16_t org;            /**< Organization ID */
     uint16_t flags;          /**< Order flags (type, side, etc.) - now 16-bit */
-    uint32_t parent_idx;     /**< Reserved for future use */
+    uint32_t order_id;       /**< Unique order ID (persistent across slot reuse) */
     
     /* 4 intrusive queue nodes (32 bytes) - total 64 bytes = one cache line */
     OmIntrusiveNode queue_nodes[OM_MAX_QUEUES];
@@ -106,6 +106,7 @@ typedef struct OmDualSlab {
     OmSlabA slab_a;          /**< Fixed slab with mandatory fields + queues */
     OmSlabB slab_b;          /**< Aux slab for user cold data only */
     OmSlabConfig config;     /**< Configuration (copied at init) */
+    uint32_t next_order_id;  /**< Auto-increment order ID counter (starts at 1) */
 } OmDualSlab;
 
 /* Product book structure - array indexed by product_id (0 to 65535)
@@ -130,29 +131,75 @@ void om_slab_destroy(OmDualSlab *slab);
 OmSlabSlot *om_slab_alloc(OmDualSlab *slab);
 void om_slab_free(OmDualSlab *slab, OmSlabSlot *slot);
 
-void *om_slab_alloc_aux(OmDualSlab *slab, OmSlabSlot **parent_slot);
-void om_slab_free_aux(OmDualSlab *slab, void *aux_data);
+/* Generate next unique order ID (auto-increment, starts at 1) */
+uint32_t om_slab_next_order_id(OmDualSlab *slab);
 
-void *om_slot_get_data(OmSlabSlot *slot);
-
-/* Mandatory field accessors */
-uint64_t om_slot_get_price(const OmSlabSlot *slot);
-uint64_t om_slot_get_volume(const OmSlabSlot *slot);
-uint64_t om_slot_get_volume_remain(const OmSlabSlot *slot);
-uint16_t om_slot_get_org(const OmSlabSlot *slot);
-uint16_t om_slot_get_flags(const OmSlabSlot *slot);
-uint32_t om_slot_get_parent_idx(const OmSlabSlot *slot);
-
-void om_slot_set_price(OmSlabSlot *slot, uint64_t price);
-void om_slot_set_volume(OmSlabSlot *slot, uint64_t volume);
-void om_slot_set_volume_remain(OmSlabSlot *slot, uint64_t volume_remain);
-void om_slot_set_org(OmSlabSlot *slot, uint16_t org);
-void om_slot_set_flags(OmSlabSlot *slot, uint16_t flags);
-void om_slot_set_parent_idx(OmSlabSlot *slot, uint32_t parent_idx);
-
-/* Slot index utilities (only for fixed slab A) */
+/* Slot index utilities (only for fixed slab A) - implemented in .c file */
 uint32_t om_slot_get_idx(const OmDualSlab *slab, const OmSlabSlot *slot);
 OmSlabSlot *om_slot_from_idx(const OmDualSlab *slab, uint32_t idx);
+
+/* Inline accessor functions for performance */
+
+/* Get pointer to user data (secondary hot data in fixed slab) */
+static inline void *om_slot_get_data(OmSlabSlot *slot) {
+    return slot->data;
+}
+
+/* Get pointer to aux data (cold data in aux slab) - calculated from slot index */
+static inline void *om_slot_get_aux_data(OmDualSlab *slab, OmSlabSlot *slot) {
+    uint32_t idx = om_slot_get_idx(slab, slot);
+    return slab->slab_b.blocks[0] + idx * slab->slab_b.slot_size;
+}
+
+/* Mandatory field getters - all inline */
+static inline uint64_t om_slot_get_price(const OmSlabSlot *slot) {
+    return slot->price;
+}
+
+static inline uint64_t om_slot_get_volume(const OmSlabSlot *slot) {
+    return slot->volume;
+}
+
+static inline uint64_t om_slot_get_volume_remain(const OmSlabSlot *slot) {
+    return slot->volume_remain;
+}
+
+static inline uint16_t om_slot_get_org(const OmSlabSlot *slot) {
+    return slot->org;
+}
+
+static inline uint16_t om_slot_get_flags(const OmSlabSlot *slot) {
+    return slot->flags;
+}
+
+static inline uint32_t om_slot_get_order_id(const OmSlabSlot *slot) {
+    return slot->order_id;
+}
+
+/* Mandatory field setters - all inline */
+static inline void om_slot_set_price(OmSlabSlot *slot, uint64_t price) {
+    slot->price = price;
+}
+
+static inline void om_slot_set_volume(OmSlabSlot *slot, uint64_t volume) {
+    slot->volume = volume;
+}
+
+static inline void om_slot_set_volume_remain(OmSlabSlot *slot, uint64_t volume_remain) {
+    slot->volume_remain = volume_remain;
+}
+
+static inline void om_slot_set_org(OmSlabSlot *slot, uint16_t org) {
+    slot->org = org;
+}
+
+static inline void om_slot_set_flags(OmSlabSlot *slot, uint16_t flags) {
+    slot->flags = flags;
+}
+
+static inline void om_slot_set_order_id(OmSlabSlot *slot, uint32_t order_id) {
+    slot->order_id = order_id;
+}
 
 /* Queue utilities for managing intrusive lists
  * These functions operate on a specific queue index (q_idx) within slots

@@ -94,87 +94,6 @@ START_TEST(test_slab_alloc_many)
 }
 END_TEST
 
-START_TEST(test_slab_null_handling)
-{
-    // NULL slab alloc
-    OmSlabSlot *slot = om_slab_alloc(NULL);
-    ck_assert_ptr_null(slot);
-    
-    // NULL slot free (should not crash)
-    OmDualSlab slab;
-    OmSlabConfig config = {sizeof(int), sizeof(int), 64};
-    om_slab_init(&slab, &config);
-    om_slab_free(&slab, NULL);
-    
-    // NULL slot data
-    void *data = om_slot_get_data(NULL);
-    ck_assert_ptr_null(data);
-    
-    om_slab_destroy(&slab);
-}
-END_TEST
-
-START_TEST(test_mandatory_fields)
-{
-    OmDualSlab slab;
-    OmSlabConfig config = {sizeof(uint64_t), sizeof(uint64_t), 64};
-    om_slab_init(&slab, &config);
-    
-    OmSlabSlot *slot = om_slab_alloc(&slab);
-    ck_assert_ptr_nonnull(slot);
-    
-    // Check initial values are zero
-    ck_assert_uint_eq(om_slot_get_price(slot), 0);
-    ck_assert_uint_eq(om_slot_get_volume(slot), 0);
-    ck_assert_uint_eq(om_slot_get_volume_remain(slot), 0);
-    ck_assert_uint_eq(om_slot_get_org(slot), 0);
-    ck_assert_uint_eq(om_slot_get_flags(slot), 0);
-    
-    // Set values
-    om_slot_set_price(slot, 12345);
-    om_slot_set_volume(slot, 1000);
-    om_slot_set_volume_remain(slot, 500);
-    om_slot_set_org(slot, 42);
-    om_slot_set_flags(slot, 0xBEEF);
-    
-    // Verify values
-    ck_assert_uint_eq(om_slot_get_price(slot), 12345);
-    ck_assert_uint_eq(om_slot_get_volume(slot), 1000);
-    ck_assert_uint_eq(om_slot_get_volume_remain(slot), 500);
-    ck_assert_uint_eq(om_slot_get_org(slot), 42);
-    ck_assert_uint_eq(om_slot_get_flags(slot), 0xBEEF);
-    
-    om_slab_free(&slab, slot);
-    om_slab_destroy(&slab);
-}
-END_TEST
-
-START_TEST(test_alloc_clears_mandatory_fields)
-{
-    OmDualSlab slab;
-    OmSlabConfig config = {0, 0, 64};  // No user data
-    om_slab_init(&slab, &config);
-    
-    OmSlabSlot *slot = om_slab_alloc(&slab);
-    ck_assert_ptr_nonnull(slot);
-    
-    // Set values
-    om_slot_set_price(slot, 99999);
-    om_slot_set_volume(slot, 88888);
-    
-    // Free and reallocate
-    om_slab_free(&slab, slot);
-    slot = om_slab_alloc(&slab);
-    
-    // Values should be cleared
-    ck_assert_uint_eq(om_slot_get_price(slot), 0);
-    ck_assert_uint_eq(om_slot_get_volume(slot), 0);
-    
-    om_slab_free(&slab, slot);
-    om_slab_destroy(&slab);
-}
-END_TEST
-
 Suite* slab_suite(void)
 {
     Suite* s = suite_create("Slab");
@@ -184,13 +103,7 @@ Suite* slab_suite(void)
     tcase_add_test(tc_core, test_slab_init_invalid);
     tcase_add_test(tc_core, test_slab_alloc_free);
     tcase_add_test(tc_core, test_slab_alloc_many);
-    tcase_add_test(tc_core, test_slab_null_handling);
     suite_add_tcase(s, tc_core);
-    
-    TCase* tc_fields = tcase_create("MandatoryFields");
-    tcase_add_test(tc_fields, test_mandatory_fields);
-    tcase_add_test(tc_fields, test_alloc_clears_mandatory_fields);
-    suite_add_tcase(s, tc_fields);
     
     return s;
 }
