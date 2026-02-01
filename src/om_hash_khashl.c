@@ -33,7 +33,7 @@ void om_hash_destroy(OmHashMap *map) {
     free(map);
 }
 
-bool om_hash_insert(OmHashMap *map, uint64_t key, void *value) {
+bool om_hash_insert(OmHashMap *map, uint64_t key, uint32_t value) {
     if (!map || !map->hash) return false;
 
     int ret;
@@ -47,12 +47,12 @@ bool om_hash_insert(OmHashMap *map, uint64_t key, void *value) {
     return true;
 }
 
-void *om_hash_get(OmHashMap *map, uint64_t key) {
-    if (!map || !map->hash) return NULL;
+uint32_t om_hash_get(OmHashMap *map, uint64_t key) {
+    if (!map || !map->hash) return UINT32_MAX;
 
     khint_t idx = khl_get(map->hash, key);
     if (idx >= kh_end(map->hash)) {
-        return NULL;
+        return UINT32_MAX;
     }
 
     return kh_val(map->hash, idx);

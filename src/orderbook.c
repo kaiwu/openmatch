@@ -255,7 +255,7 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
 
     /* Add order to hashmap for O(1) lookup by order_id */
     uint32_t slot_idx = om_slot_get_idx(&ctx->slab, order);
-    om_hash_insert(ctx->order_hashmap, order->order_id, (void *)(uintptr_t)slot_idx);
+    om_hash_insert(ctx->order_hashmap, order->order_id, slot_idx);
 
     return 0;
 }
@@ -267,13 +267,12 @@ bool om_orderbook_cancel(OmOrderbookContext *ctx, uint16_t product_id,
         return false;
     }
 
-    /* Look up order slot from hashmap */
-    void *slot_ptr = om_hash_get(ctx->order_hashmap, order_id);
-    if (!slot_ptr) {
+    /* Look up order slot index from hashmap */
+    uint32_t slot_idx = om_hash_get(ctx->order_hashmap, order_id);
+    if (slot_idx == UINT32_MAX) {
         return false;  /* Order not found in hashmap */
     }
 
-    uint32_t slot_idx = (uint32_t)(uintptr_t)slot_ptr;
     OmSlabSlot *order = om_slot_from_idx(&ctx->slab, slot_idx);
     if (!order) {
         return false;  /* Invalid slot index */
@@ -372,12 +371,11 @@ OmSlabSlot *om_orderbook_get_slot_by_id(OmOrderbookContext *ctx, uint32_t order_
     }
 
     /* Look up slot index from hashmap */
-    void *slot_ptr = om_hash_get(ctx->order_hashmap, order_id);
-    if (!slot_ptr) {
+    uint32_t slot_idx = om_hash_get(ctx->order_hashmap, order_id);
+    if (slot_idx == UINT32_MAX) {
         return NULL;  /* Order not found or not active */
     }
 
-    uint32_t slot_idx = (uint32_t)(uintptr_t)slot_ptr;
     return om_slot_from_idx(&ctx->slab, slot_idx);
 }
 

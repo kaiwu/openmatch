@@ -7,14 +7,14 @@ OmHashMap *om_hash_create(size_t initial_capacity) {
     OmHashMap *map = calloc(1, sizeof(OmHashMap));
     if (!map) return NULL;
 
-    map->hash = kh_init(ptr);
+    map->hash = kh_init(idx);
     if (!map->hash) {
         free(map);
         return NULL;
     }
 
     if (initial_capacity > 0) {
-        kh_resize(ptr, map->hash, initial_capacity);
+        kh_resize(idx, map->hash, initial_capacity);
     }
 
     return map;
@@ -24,16 +24,16 @@ void om_hash_destroy(OmHashMap *map) {
     if (!map) return;
 
     if (map->hash) {
-        kh_destroy(ptr, map->hash);
+        kh_destroy(idx, map->hash);
     }
     free(map);
 }
 
-bool om_hash_insert(OmHashMap *map, uint64_t key, void *value) {
+bool om_hash_insert(OmHashMap *map, uint64_t key, uint32_t value) {
     if (!map || !map->hash) return false;
 
     int ret;
-    khiter_t k = kh_put(ptr, map->hash, key, &ret);
+    khiter_t k = kh_put(idx, map->hash, key, &ret);
 
     if (ret < 0) {
         return false;
@@ -43,12 +43,12 @@ bool om_hash_insert(OmHashMap *map, uint64_t key, void *value) {
     return true;
 }
 
-void *om_hash_get(OmHashMap *map, uint64_t key) {
-    if (!map || !map->hash) return NULL;
+uint32_t om_hash_get(OmHashMap *map, uint64_t key) {
+    if (!map || !map->hash) return UINT32_MAX;
 
-    khiter_t k = kh_get(ptr, map->hash, key);
+    khiter_t k = kh_get(idx, map->hash, key);
     if (k == kh_end(map->hash)) {
-        return NULL;
+        return UINT32_MAX;
     }
 
     return kh_value(map->hash, k);
@@ -57,19 +57,19 @@ void *om_hash_get(OmHashMap *map, uint64_t key) {
 bool om_hash_remove(OmHashMap *map, uint64_t key) {
     if (!map || !map->hash) return false;
 
-    khiter_t k = kh_get(ptr, map->hash, key);
+    khiter_t k = kh_get(idx, map->hash, key);
     if (k == kh_end(map->hash)) {
         return false;
     }
 
-    kh_del(ptr, map->hash, k);
+    kh_del(idx, map->hash, k);
     return true;
 }
 
 bool om_hash_contains(OmHashMap *map, uint64_t key) {
     if (!map || !map->hash) return false;
 
-    khiter_t k = kh_get(ptr, map->hash, key);
+    khiter_t k = kh_get(idx, map->hash, key);
     return k != kh_end(map->hash);
 }
 
