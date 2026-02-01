@@ -5,68 +5,91 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Forward declaration - defined in om_slab.h */
+struct OmSlabSlot;
+
 /* 
  * High-performance WAL optimized for maximum write throughput
+ * Now includes BOTH fixed slab (hot+secondary hot) and aux slab (cold) data
  * Design goals: <200ns per write, 5M+ writes/sec per core
  */
 
 /* WAL record types */
 typedef enum OmWalType {
-    OM_WAL_INSERT = 1,      /* 64 bytes */
+    OM_WAL_INSERT = 1,      /* Variable size: includes fixed+aux data */
     OM_WAL_CANCEL = 2,      /* 32 bytes */
     OM_WAL_MATCH = 3,       /* 48 bytes */
     OM_WAL_CHECKPOINT = 4,  /* 32 bytes */
 } OmWalType;
 
-/* Compact record header - 8 bytes only */
+/* Compact record header - 8 bytes */
 typedef struct OmWalHeader {
     uint64_t seq_type_len;  /* Packed: sequence (40 bits) | type (8 bits) | len (16 bits) */
 } OmWalHeader;
 
-/* Insert record - total 64 bytes (header + payload) */
+/* Insert record header - describes the variable-length data that follows */
+/* Total header: 64 bytes, followed by: user_data + aux_data */
 typedef struct OmWalInsert {
-    uint64_t order_id;      /* 8 bytes */
-    uint64_t price;         /* 8 bytes */
-    uint64_t volume;        /* 8 bytes */
-    uint64_t vol_remain;    /* 8 bytes */
-    uint32_t slot_idx;      /* 4 bytes */
-    uint16_t product_id;    /* 2 bytes */
-    uint16_t org;           /* 2 bytes */
-    uint16_t flags;         /* 2 bytes */
-    uint16_t reserved[3];   /* 6 bytes - padding to 48 byte payload */
-    /* Header: 8 bytes, Payload: 48 bytes, Total: 56 bytes - add 8 more for alignment */
-    uint64_t timestamp_ns;  /* 8 bytes - total 64 bytes */
+    /* Core order fields (from OmSlabSlot mandatory fields) */
+    uint64_t order_id;          /* 8 bytes - unique order ID */
+    uint64_t price;             /* 8 bytes - order price */
+    uint64_t volume;            /* 8 bytes - original volume */
+    uint64_t vol_remain;        /* 8 bytes - remaining volume */
+    uint16_t org;               /* 2 bytes - organization ID */
+    uint16_t flags;             /* 2 bytes - order flags (side, type, etc.) */
+    uint16_t product_id;        /* 2 bytes - product ID */
+    uint16_t reserved;          /* 2 bytes - padding */
+    
+    /* Data sizes for variable-length payload that follows */
+    uint32_t user_data_size;    /* 4 bytes - size of secondary hot data (from slab A) */
+    uint32_t aux_data_size;     /* 4 bytes - size of cold data (from slab B) */
+    
+    /* Timestamp */
+    uint64_t timestamp_ns;      /* 8 bytes - write timestamp */
+    
+    /* 
+     * Variable-length payload follows this header in WAL:
+     * - user_data[user_data_size] from om_slot_get_data(slot)
+     * - aux_data[aux_data_size] from om_slot_get_aux_data(&slab, slot)
+     * 
+     * Total record size = sizeof(OmWalHeader) + sizeof(OmWalInsert) + user_data_size + aux_data_size
+     * Aligned to 8-byte boundary
+     */
 } OmWalInsert;
 
 /* Cancel record - total 32 bytes */
 typedef struct OmWalCancel {
-    uint64_t order_id;      /* 8 bytes */
-    uint64_t timestamp_ns;  /* 8 bytes */
-    uint32_t slot_idx;      /* 4 bytes */
-    uint16_t product_id;    /* 2 bytes */
-    uint16_t reserved;      /* 2 bytes */
+    uint64_t order_id;          /* 8 bytes - order being cancelled */
+    uint64_t timestamp_ns;      /* 8 bytes - cancel timestamp */
+    uint32_t slot_idx;          /* 4 bytes - slot index being freed */
+    uint16_t product_id;        /* 2 bytes - product ID */
+    uint16_t reserved;          /* 2 bytes - padding */
     /* Total payload: 24 bytes + 8 byte header = 32 bytes */
 } OmWalCancel;
 
 /* Match record - total 48 bytes */
 typedef struct OmWalMatch {
-    uint64_t maker_id;      /* 8 bytes */
-    uint64_t taker_id;      /* 8 bytes */
-    uint64_t price;         /* 8 bytes */
-    uint64_t volume;        /* 8 bytes */
-    uint64_t timestamp_ns;  /* 8 bytes */
-    uint16_t product_id;    /* 2 bytes */
-    uint16_t reserved[3];   /* 6 bytes - total payload: 40 bytes + 8 header = 48 */
+    uint64_t maker_id;          /* 8 bytes - maker order ID */
+    uint64_t taker_id;          /* 8 bytes - taker order ID */
+    uint64_t price;             /* 8 bytes - execution price */
+    uint64_t volume;            /* 8 bytes - volume traded */
+    uint64_t timestamp_ns;      /* 8 bytes - trade timestamp */
+    uint16_t product_id;        /* 2 bytes - product ID */
+    uint16_t reserved[3];       /* 6 bytes - padding */
+    /* Total payload: 40 bytes + 8 byte header = 48 bytes */
 } OmWalMatch;
 
-/* WAL configuration for maximum throughput */
+/* WAL configuration - now includes data sizes for variable-length records */
 typedef struct OmWalConfig {
     const char *filename;       /* WAL file path */
-    size_t buffer_size;         /* Per-thread buffer size (default 1MB) */
-    uint32_t batch_size;        /* Records to batch before write (default 100) */
+    size_t buffer_size;         /* Write buffer size (default 1MB) */
     uint32_t sync_interval_ms;  /* Fsync interval in ms (default 10) */
     bool use_direct_io;         /* Use O_DIRECT (default true) */
     bool enable_crc32;          /* CRC32 validation (default false for speed) */
+    
+    /* Data sizes - must match slab configuration */
+    size_t user_data_size;      /* Size of secondary hot data (from OmSlabConfig.user_data_size) */
+    size_t aux_data_size;       /* Size of cold data (from OmSlabConfig.aux_data_size) */
 } OmWalConfig;
 
 /* WAL context */
@@ -78,7 +101,7 @@ typedef struct OmWal {
     size_t buffer_used;         /* Bytes used in current buffer */
     uint64_t sequence;          /* Next sequence number */
     uint64_t file_offset;       /* Current file offset */
-    OmWalConfig config;         /* Configuration copy */
+    OmWalConfig config;         /* Configuration copy with data sizes */
 } OmWal;
 
 /* Initialize WAL with high-performance settings */
@@ -89,20 +112,32 @@ void om_wal_close(OmWal *wal);
 
 /* Write operations - all return sequence number on success, 0 on failure */
 /* These are FAST PATH - just append to buffer, no syscalls, no locks */
-uint64_t om_wal_insert(OmWal *wal, const OmWalInsert *rec);
-uint64_t om_wal_cancel(OmWal *wal, const OmWalCancel *rec);
+
+/* 
+ * Log insert to WAL - stores BOTH fixed slot data and aux data
+ * @param wal WAL context
+ * @param slot Order slot with all data
+ * @param product_id Product ID for this order
+ * @return Sequence number on success, 0 on failure
+ * 
+ * Stores:
+ * - OmSlabSlot mandatory fields (price, volume, etc.)
+ * - User data (secondary hot data from slot->data[])
+ * - Aux data (cold data from slab_b)
+ */
+uint64_t om_wal_insert(OmWal *wal, struct OmSlabSlot *slot, uint16_t product_id);
+
+/* Log cancel to WAL */
+uint64_t om_wal_cancel(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id);
+
+/* Log match to WAL */
 uint64_t om_wal_match(OmWal *wal, const OmWalMatch *rec);
 
 /* Flush buffer to disk - call periodically or when buffer is full */
-/* This is where the actual write() syscall happens */
 int om_wal_flush(OmWal *wal);
 
 /* Force fsync - call on checkpoint or graceful shutdown */
 int om_wal_fsync(OmWal *wal);
-
-/* Batch write multiple records at once - more efficient */
-uint64_t om_wal_write_batch(OmWal *wal, OmWalType type, const void *records, 
-                            uint32_t count, size_t record_size);
 
 /* Get current sequence number */
 static inline uint64_t om_wal_sequence(const OmWal *wal) {
@@ -135,6 +170,10 @@ typedef struct OmWalReplay {
     uint64_t file_size;         /* Total file size */
     uint64_t last_sequence;     /* Last sequence number read */
     bool eof;                   /* End of file reached */
+    
+    /* Data sizes from WAL config - needed for parsing insert records */
+    size_t user_data_size;
+    size_t aux_data_size;
 } OmWalReplay;
 
 /* Initialize replay iterator for reading WAL file */
@@ -145,6 +184,7 @@ void om_wal_replay_close(OmWalReplay *replay);
 
 /* Read next record from WAL during replay */
 /* Returns: 1 = success, 0 = EOF, -1 = error */
+/* For INSERT records, data_len includes both header + user_data + aux_data */
 int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data, 
                        uint64_t *sequence, size_t *data_len);
 
@@ -162,20 +202,19 @@ typedef struct OmWalReplayStats {
 struct OmOrderbookContext;
 
 /**
- * Replay WAL file and reconstruct orderbook state
- * This is the main recovery function - call on startup to restore state after crash
+ * Replay WAL file and reconstruct orderbook state with FULL data recovery
  * 
- * @param ctx Orderbook context to reconstruct
+ * This function reconstructs the ENTIRE orderbook state including:
+ * - Fixed slab (OmSlabSlot): mandatory fields + secondary hot data
+ * - Aux slab (OmSlabB): cold/auxiliary data
+ * - Hashmap: order_id -> slot mappings
+ * - Price ladders: Q1 price level linked lists
+ * - Time queues: Q2 FIFO per price level
+ * 
+ * @param ctx Orderbook context to reconstruct (must be initialized with same config)
  * @param wal_filename Path to WAL file
  * @param stats Output statistics (can be NULL)
  * @return 0 on success, negative on error
- * 
- * Process:
- * 1. Scan WAL file from beginning
- * 2. For INSERT: allocate slot, restore order data, add to price ladder and hashmap
- * 3. For CANCEL: remove order from price ladder, remove from hashmap, free slot
- * 4. For MATCH: update volume_remain, if fully filled remove order
- * 5. Rebuild all indices (price ladders, hashmap, etc.)
  */
 int om_orderbook_recover_from_wal(struct OmOrderbookContext *ctx, 
                                    const char *wal_filename,

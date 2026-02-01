@@ -411,8 +411,9 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
     while (om_wal_replay_next(&replay, &type, &data, &sequence, &data_len) == 1) {
         switch (type) {
             case OM_WAL_INSERT: {
-                if (data_len != sizeof(OmWalInsert)) {
-                    continue;  /* Corrupted record */
+                /* Variable length record: sizeof(OmWalInsert) + user_data_size + aux_data_size */
+                if (data_len < sizeof(OmWalInsert)) {
+                    continue;  /* Corrupted record - too small */
                 }
                 OmWalInsert *rec = (OmWalInsert *)data;
                 
@@ -430,6 +431,24 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
                 slot->volume_remain = rec->vol_remain;
                 slot->org = rec->org;
                 slot->flags = rec->flags;
+                
+                /* Copy user_data and aux_data from WAL record to slot */
+                if (rec->user_data_size > 0 || rec->aux_data_size > 0) {
+                    uint8_t *user_data_src = (uint8_t *)data + sizeof(OmWalInsert);
+                    uint8_t *aux_data_src = user_data_src + rec->user_data_size;
+                    
+                    /* Copy user_data to slot */
+                    if (rec->user_data_size > 0) {
+                        void *user_data = om_slot_get_data(slot);
+                        memcpy(user_data, user_data_src, rec->user_data_size);
+                    }
+                    
+                    /* Copy aux_data to slot */
+                    if (rec->aux_data_size > 0) {
+                        void *aux_data = om_slot_get_aux_data(&ctx->slab, slot);
+                        memcpy(aux_data, aux_data_src, rec->aux_data_size);
+                    }
+                }
                 
                 /* Add to orderbook - this adds to price ladder, hashmap, etc. */
                 if (om_orderbook_insert(ctx, rec->product_id, slot) != 0) {

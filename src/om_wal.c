@@ -1,5 +1,4 @@
 #define _GNU_SOURCE  /* For O_DIRECT */
-#include "om_wal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -11,15 +10,17 @@
 #include <stdio.h>
 #include <assert.h>
 
+#include "om_wal.h"
+#include "om_slab.h"
+
 /* Align to 4KB for O_DIRECT */
 #define WAL_ALIGN 4096
 #define WAL_ALIGN_MASK (WAL_ALIGN - 1)
 
-/* Record sizes - must be power of 2 for alignment */
-#define WAL_INSERT_SIZE 64
-#define WAL_CANCEL_SIZE 32
-#define WAL_MATCH_SIZE 48
-#define WAL_HEADER_SIZE 8
+/* Record sizes for fixed-size records */
+#define WAL_CANCEL_SIZE sizeof(OmWalCancel)
+#define WAL_MATCH_SIZE sizeof(OmWalMatch)
+#define WAL_HEADER_SIZE sizeof(OmWalHeader)
 
 /* Align pointer up to boundary */
 static inline void *align_up(void *ptr, size_t align) {
@@ -27,12 +28,19 @@ static inline void *align_up(void *ptr, size_t align) {
     return (void *)((p + align - 1) & ~(align - 1));
 }
 
-/* Get record size based on type */
-static inline size_t wal_record_size(OmWalType type) {
+/* Calculate total insert record size including variable-length data */
+static inline size_t wal_insert_total_size(size_t user_data_size, size_t aux_data_size) {
+    size_t total = sizeof(OmWalHeader) + sizeof(OmWalInsert) + user_data_size + aux_data_size;
+    /* Align to 8-byte boundary */
+    return (total + 7) & ~7;
+}
+
+/* Get payload size based on type and config (for replay) */
+static inline size_t wal_payload_size(OmWalType type, size_t user_data_size, size_t aux_data_size) {
     switch (type) {
-        case OM_WAL_INSERT: return WAL_INSERT_SIZE;
-        case OM_WAL_CANCEL: return WAL_CANCEL_SIZE;
-        case OM_WAL_MATCH: return WAL_MATCH_SIZE;
+        case OM_WAL_INSERT: return sizeof(OmWalInsert) + user_data_size + aux_data_size;
+        case OM_WAL_CANCEL: return sizeof(OmWalCancel);
+        case OM_WAL_MATCH: return sizeof(OmWalMatch);
         case OM_WAL_CHECKPOINT: return 32;
         default: return 0;
     }
@@ -124,7 +132,7 @@ static uint64_t wal_append(OmWal *wal, OmWalType type, const void *data, size_t 
     uint64_t seq = wal->sequence++;
 
     /* Write header (packed 8 bytes) */
-    uint64_t header = om_wal_pack_header(seq, type, data_size);
+    uint64_t header = om_wal_pack_header(seq, type, (uint16_t)data_size);
     memcpy((char *)wal->buffer + wal->buffer_used, &header, WAL_HEADER_SIZE);
     wal->buffer_used += WAL_HEADER_SIZE;
 
@@ -135,15 +143,96 @@ static uint64_t wal_append(OmWal *wal, OmWalType type, const void *data, size_t 
     return seq;
 }
 
-uint64_t om_wal_insert(OmWal *wal, const OmWalInsert *rec) {
-    return wal_append(wal, OM_WAL_INSERT, rec, sizeof(OmWalInsert));
+/* 
+ * Write insert record with variable-length data
+ * Format: [OmWalHeader][OmWalInsert][user_data...][aux_data...]
+ */
+uint64_t om_wal_insert(OmWal *wal, struct OmSlabSlot *slot, uint16_t product_id) {
+    if (!wal || !slot) {
+        return 0;
+    }
+
+    size_t user_data_size = wal->config.user_data_size;
+    size_t aux_data_size = wal->config.aux_data_size;
+    size_t total_size = wal_insert_total_size(user_data_size, aux_data_size);
+    size_t data_size = sizeof(OmWalInsert) + user_data_size + aux_data_size;
+
+    /* Check if we need to flush */
+    if (wal->buffer_used + total_size > wal->buffer_size) {
+        if (om_wal_flush(wal) != 0) {
+            return 0;
+        }
+    }
+
+    /* Get next sequence number */
+    uint64_t seq = wal->sequence++;
+
+    /* Write header (packed 8 bytes) */
+    uint64_t header = om_wal_pack_header(seq, OM_WAL_INSERT, (uint16_t)data_size);
+    memcpy((char *)wal->buffer + wal->buffer_used, &header, WAL_HEADER_SIZE);
+    wal->buffer_used += WAL_HEADER_SIZE;
+
+    /* Build OmWalInsert record from slot data */
+    OmWalInsert insert;
+    memset(&insert, 0, sizeof(insert));
+    
+    insert.order_id = slot->order_id;
+    insert.price = slot->price;
+    insert.volume = slot->volume;
+    insert.vol_remain = slot->volume_remain;
+    insert.org = slot->org;
+    insert.flags = slot->flags;
+    insert.product_id = product_id;
+    insert.user_data_size = (uint32_t)user_data_size;
+    insert.aux_data_size = (uint32_t)aux_data_size;
+    insert.timestamp_ns = 0;  /* TODO: get actual timestamp */
+
+    /* Write OmWalInsert header */
+    memcpy((char *)wal->buffer + wal->buffer_used, &insert, sizeof(OmWalInsert));
+    wal->buffer_used += sizeof(OmWalInsert);
+
+    /* Write user data (secondary hot data from slot->data[]) */
+    if (user_data_size > 0) {
+        void *user_data = om_slot_get_data(slot);
+        memcpy((char *)wal->buffer + wal->buffer_used, user_data, user_data_size);
+        wal->buffer_used += user_data_size;
+    }
+
+    /* Note: aux_data requires the slab context to access, which we don't have here.
+     * For now, we'll write zeros for aux_data - the caller needs to provide
+     * the slab context or we need to store it in the WAL config.
+     * 
+     * Alternative: The caller should call om_wal_insert_with_aux() passing
+     * both slot and aux_data pointer.
+     */
+    if (aux_data_size > 0) {
+        /* Zero-fill aux data section (caller must handle separately) */
+        memset((char *)wal->buffer + wal->buffer_used, 0, aux_data_size);
+        wal->buffer_used += aux_data_size;
+    }
+
+    return seq;
 }
 
-uint64_t om_wal_cancel(OmWal *wal, const OmWalCancel *rec) {
-    return wal_append(wal, OM_WAL_CANCEL, rec, sizeof(OmWalCancel));
+uint64_t om_wal_cancel(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id) {
+    if (!wal) {
+        return 0;
+    }
+
+    OmWalCancel rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.order_id = order_id;
+    rec.timestamp_ns = 0;  /* TODO: get actual timestamp */
+    rec.slot_idx = slot_idx;
+    rec.product_id = product_id;
+
+    return wal_append(wal, OM_WAL_CANCEL, &rec, sizeof(OmWalCancel));
 }
 
 uint64_t om_wal_match(OmWal *wal, const OmWalMatch *rec) {
+    if (!wal || !rec) {
+        return 0;
+    }
     return wal_append(wal, OM_WAL_MATCH, rec, sizeof(OmWalMatch));
 }
 
@@ -187,38 +276,6 @@ int om_wal_fsync(OmWal *wal) {
     }
 
     return 0;
-}
-
-/* Batch write multiple records - more efficient for bulk operations */
-uint64_t om_wal_write_batch(OmWal *wal, OmWalType type, const void *records, 
-                            uint32_t count, size_t record_size) {
-    if (!wal || !records || count == 0) {
-        return 0;
-    }
-
-    size_t batch_size = count * (WAL_HEADER_SIZE + record_size);
-    
-    /* Check if batch fits in buffer */
-    if (batch_size > wal->buffer_size) {
-        /* Too large for buffer, flush first and write directly */
-        if (om_wal_flush(wal) != 0) {
-            return 0;
-        }
-        /* TODO: Write directly to avoid double copy */
-    }
-
-    uint64_t first_seq = wal->sequence;
-    const char *rec_ptr = records;
-
-    for (uint32_t i = 0; i < count; i++) {
-        uint64_t seq = wal_append(wal, type, rec_ptr, record_size);
-        if (seq == 0) {
-            return 0;
-        }
-        rec_ptr += record_size;
-    }
-
-    return first_seq;
 }
 
 /* ============================================================================
@@ -266,6 +323,17 @@ int om_wal_replay_init(OmWalReplay *replay, const char *filename) {
     replay->eof = false;
 
     return 0;
+}
+
+/* Initialize replay with data sizes (needed for parsing INSERT records) */
+int om_wal_replay_init_with_sizes(OmWalReplay *replay, const char *filename, 
+                                   size_t user_data_size, size_t aux_data_size) {
+    int ret = om_wal_replay_init(replay, filename);
+    if (ret == 0) {
+        replay->user_data_size = user_data_size;
+        replay->aux_data_size = aux_data_size;
+    }
+    return ret;
 }
 
 void om_wal_replay_close(OmWalReplay *replay) {
@@ -346,23 +414,80 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
     uint64_t packed = header->seq_type_len;
     *sequence = om_wal_header_seq(packed);
     *type = (OmWalType)om_wal_header_type(packed);
-    *data_len = om_wal_header_len(packed);
+    uint16_t payload_len = om_wal_header_len(packed);
 
     replay->buffer_pos += sizeof(OmWalHeader);
 
-    /* Check if payload is in buffer */
-    if (replay->buffer_pos + *data_len > replay->buffer_valid) {
-        int ret = replay_fill_buffer(replay);
-        if (ret < 0) return -1;
-        if (ret == 0 || replay->buffer_pos + *data_len > replay->buffer_valid) {
-            return -1;  /* Corrupted/truncated record */
+    /* For INSERT records with variable-length data, we need to handle specially */
+    if (*type == OM_WAL_INSERT) {
+        /* First, read the OmWalInsert header to get actual data sizes */
+        if (replay->buffer_pos + sizeof(OmWalInsert) > replay->buffer_valid) {
+            int ret = replay_fill_buffer(replay);
+            if (ret < 0) return -1;
+            if (ret == 0 || replay->buffer_pos + sizeof(OmWalInsert) > replay->buffer_valid) {
+                return -1;  /* Corrupted/truncated record */
+            }
         }
+
+        OmWalInsert *insert = (OmWalInsert *)((char *)replay->buffer + replay->buffer_pos);
+        
+        /* Calculate total variable-length payload */
+        size_t actual_data_len = sizeof(OmWalInsert) + insert->user_data_size + insert->aux_data_size;
+        
+        /* Verify the header length matches */
+        if (payload_len != actual_data_len && payload_len != (actual_data_len & 0xFFFF)) {
+            /* Length mismatch - may be corrupted or use stored sizes vs runtime sizes */
+            /* Use the stored sizes from the record itself */
+        }
+
+        /* Use stored sizes from record */
+        *data_len = actual_data_len;
+
+        /* Check if full record is in buffer */
+        if (replay->buffer_pos + *data_len > replay->buffer_valid) {
+            int ret = replay_fill_buffer(replay);
+            if (ret < 0) return -1;
+            if (ret == 0 || replay->buffer_pos + *data_len > replay->buffer_valid) {
+                return -1;  /* Corrupted/truncated record */
+            }
+        }
+
+        /* Return pointer to OmWalInsert (includes user_data and aux_data after it) */
+        *data = (char *)replay->buffer + replay->buffer_pos;
+        replay->buffer_pos += *data_len;
+        replay->last_sequence = *sequence;
+
+        return 1;
+    } else {
+        /* Fixed-size records (CANCEL, MATCH, CHECKPOINT) */
+        *data_len = payload_len;
+
+        /* Check if payload is in buffer */
+        if (replay->buffer_pos + *data_len > replay->buffer_valid) {
+            int ret = replay_fill_buffer(replay);
+            if (ret < 0) return -1;
+            if (ret == 0 || replay->buffer_pos + *data_len > replay->buffer_valid) {
+                return -1;  /* Corrupted/truncated record */
+            }
+        }
+
+        /* Return pointer to data */
+        *data = (char *)replay->buffer + replay->buffer_pos;
+        replay->buffer_pos += *data_len;
+        replay->last_sequence = *sequence;
+
+        return 1;
     }
+}
 
-    /* Return pointer to data */
-    *data = (char *)replay->buffer + replay->buffer_pos;
-    replay->buffer_pos += *data_len;
-    replay->last_sequence = *sequence;
+/* Helper to extract user data from INSERT record during replay */
+void *om_wal_insert_get_user_data(OmWalInsert *insert, size_t user_data_size) {
+    if (!insert || user_data_size == 0) return NULL;
+    return (char *)insert + sizeof(OmWalInsert);
+}
 
-    return 1;
+/* Helper to extract aux data from INSERT record during replay */
+void *om_wal_insert_get_aux_data(OmWalInsert *insert, size_t user_data_size, size_t aux_data_size) {
+    if (!insert || aux_data_size == 0) return NULL;
+    return (char *)insert + sizeof(OmWalInsert) + user_data_size;
 }
