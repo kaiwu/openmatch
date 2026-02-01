@@ -27,7 +27,22 @@ int om_engine_init(OmEngine *engine) {
 void om_engine_destroy(OmEngine *engine) {
     if (!engine) return;
 
-    if (engine->products) {
+    // Clean up all products before destroying the hashmap
+    if (engine->products && engine->products->hash) {
+        // Iterate through all products using khash iteration macros
+        khiter_t k;
+        for (k = kh_begin(engine->products->hash); k != kh_end(engine->products->hash); ++k) {
+            if (kh_exist(engine->products->hash, k)) {
+                OmProductBook *book = (OmProductBook *)kh_value(engine->products->hash, k);
+                if (book) {
+                    // Clean up product resources (same as om_engine_remove_product)
+                    om_slab_destroy(&book->order_slab);
+                    om_slab_destroy(&book->level_slab);
+                    if (book->bid_levels) om_hash_destroy(book->bid_levels);
+                    if (book->ask_levels) om_hash_destroy(book->ask_levels);
+                }
+            }
+        }
         om_hash_destroy(engine->products);
     }
 
