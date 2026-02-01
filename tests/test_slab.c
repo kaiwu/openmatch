@@ -122,7 +122,6 @@ START_TEST(test_mandatory_fields)
     ck_assert_uint_eq(om_slot_get_volume(slot), 0);
     ck_assert_uint_eq(om_slot_get_volume_remain(slot), 0);
     ck_assert_uint_eq(om_slot_get_org(slot), 0);
-    ck_assert_uint_eq(om_slot_get_product(slot), 0);
     ck_assert_uint_eq(om_slot_get_flags(slot), 0);
     
     // Set values
@@ -130,16 +129,14 @@ START_TEST(test_mandatory_fields)
     om_slot_set_volume(slot, 1000);
     om_slot_set_volume_remain(slot, 500);
     om_slot_set_org(slot, 42);
-    om_slot_set_product(slot, 7);
-    om_slot_set_flags(slot, 0xDEADBEEF);
+    om_slot_set_flags(slot, 0xBEEF);
     
     // Verify values
     ck_assert_uint_eq(om_slot_get_price(slot), 12345);
     ck_assert_uint_eq(om_slot_get_volume(slot), 1000);
     ck_assert_uint_eq(om_slot_get_volume_remain(slot), 500);
     ck_assert_uint_eq(om_slot_get_org(slot), 42);
-    ck_assert_uint_eq(om_slot_get_product(slot), 7);
-    ck_assert_uint_eq(om_slot_get_flags(slot), 0xDEADBEEF);
+    ck_assert_uint_eq(om_slot_get_flags(slot), 0xBEEF);
     
     om_slab_free(&slab, slot);
     om_slab_destroy(&slab);

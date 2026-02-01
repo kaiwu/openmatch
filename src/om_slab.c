@@ -123,8 +123,8 @@ static OmSlabSlot *slab_a_alloc(OmSlabA *slab_a) {
     slot->volume = 0;
     slot->volume_remain = 0;
     slot->org = 0;
-    slot->product = 0;
     slot->flags = 0;
+    slot->parent_idx = OM_SLOT_IDX_NULL;
     for (int q = 0; q < OM_MAX_QUEUES; q++) {
         slot->queue_nodes[q].next_idx = OM_SLOT_IDX_NULL;
         slot->queue_nodes[q].prev_idx = OM_SLOT_IDX_NULL;
@@ -266,12 +266,12 @@ uint16_t om_slot_get_org(const OmSlabSlot *slot) {
     return slot->org;
 }
 
-uint16_t om_slot_get_product(const OmSlabSlot *slot) {
-    return slot->product;
+uint16_t om_slot_get_flags(const OmSlabSlot *slot) {
+    return slot->flags;
 }
 
-uint32_t om_slot_get_flags(const OmSlabSlot *slot) {
-    return slot->flags;
+uint32_t om_slot_get_parent_idx(const OmSlabSlot *slot) {
+    return slot->parent_idx;
 }
 
 /* Mandatory field setters */
@@ -291,10 +291,10 @@ void om_slot_set_org(OmSlabSlot *slot, uint16_t org) {
     slot->org = org;
 }
 
-void om_slot_set_product(OmSlabSlot *slot, uint16_t product) {
-    slot->product = product;
+void om_slot_set_flags(OmSlabSlot *slot, uint16_t flags) {
+    slot->flags = flags;
 }
 
-void om_slot_set_flags(OmSlabSlot *slot, uint32_t flags) {
-    slot->flags = flags;
+void om_slot_set_parent_idx(OmSlabSlot *slot, uint32_t parent_idx) {
+    slot->parent_idx = parent_idx;
 }

@@ -46,14 +46,14 @@
 
 /* Queue assignment within each slot's queue_nodes[4]:
  * Q0: Internal slab free list (do not use externally)
- * Q1: Price level queue (linking orders at the same price)
- * Q2: Time FIFO queue (time priority within a price level)
- * Q3: Reserved for future use
+ * Q1: Price ladder queue (linking different price levels together)
+ * Q2: Time FIFO queue (linking orders at the same price by time priority)
+ * Q3: Organization queue (linking all orders from same organization across products)
  */
 #define OM_Q0_INTERNAL_FREE 0
-#define OM_Q1_PRICE_LEVEL   1
+#define OM_Q1_PRICE_LADDER  1
 #define OM_Q2_TIME_FIFO     2
-#define OM_Q3_RESERVED      3
+#define OM_Q3_ORG_QUEUE     3
 
 typedef struct OmSlabSlot OmSlabSlot;
 
@@ -68,10 +68,15 @@ typedef struct OmSlabSlot {
     uint64_t volume;         /**< Original order volume */
     uint64_t volume_remain;  /**< Remaining volume to fill */
     uint16_t org;            /**< Organization ID */
-    uint16_t product;        /**< Product ID */
-    uint32_t flags;          /**< Order flags (type, side, etc.) */
+    uint16_t flags;          /**< Order flags (type, side, etc.) - now 16-bit */
+    uint32_t parent_idx;     /**< Parent index for Q1 BST tree structure */
     
-    /* 4 intrusive queue nodes (32 bytes) - total 64 bytes = one cache line */
+    /* 4 intrusive queue nodes (32 bytes) - total 64 bytes = one cache line
+     * Note: Q1 BST uses 3 fields together:
+     *   - parent_idx (above): parent node in BST
+     *   - queue_nodes[1].next_idx: left child (lower price)
+     *   - queue_nodes[1].prev_idx: right child (higher price)
+     */
     OmIntrusiveNode queue_nodes[OM_MAX_QUEUES];
     
     /* User-defined payload (flexible array member) - starts at cache line 2 */
@@ -102,6 +107,21 @@ typedef struct OmDualSlab {
     size_t user_data_size;   /**< Size of user-defined payload per slot */
 } OmDualSlab;
 
+/* Product book structure - array indexed by product_id (0 to 65535)
+ * Each product has bid/ask order books using BST for price levels (Q1)
+ * Q2 heads are per-price-level (time FIFO), stored within the slot itself
+ */
+typedef struct OmProductBook {
+    /* BST root indices (Q1) - each slot is a node in the BST
+     * BST is sorted by price: bid descending, ask ascending
+     * Q1 uses: parent_idx + queue_nodes[1].next/prev as left/right children
+     */
+    uint32_t bid_head_q1;         /**< Root of bid price BST (best bid) */
+    uint32_t ask_head_q1;         /**< Root of ask price BST (best ask) */
+} OmProductBook;
+
+#define OM_MAX_PRODUCTS 65536  /**< Maximum number of products (uint16_t max) */
+
 int om_slab_init(OmDualSlab *slab, size_t user_data_size);
 void om_slab_destroy(OmDualSlab *slab);
 
@@ -118,18 +138,91 @@ uint64_t om_slot_get_price(const OmSlabSlot *slot);
 uint64_t om_slot_get_volume(const OmSlabSlot *slot);
 uint64_t om_slot_get_volume_remain(const OmSlabSlot *slot);
 uint16_t om_slot_get_org(const OmSlabSlot *slot);
-uint16_t om_slot_get_product(const OmSlabSlot *slot);
-uint32_t om_slot_get_flags(const OmSlabSlot *slot);
+uint16_t om_slot_get_flags(const OmSlabSlot *slot);
+uint32_t om_slot_get_parent_idx(const OmSlabSlot *slot);
 
 void om_slot_set_price(OmSlabSlot *slot, uint64_t price);
 void om_slot_set_volume(OmSlabSlot *slot, uint64_t volume);
 void om_slot_set_volume_remain(OmSlabSlot *slot, uint64_t volume_remain);
 void om_slot_set_org(OmSlabSlot *slot, uint16_t org);
-void om_slot_set_product(OmSlabSlot *slot, uint16_t product);
-void om_slot_set_flags(OmSlabSlot *slot, uint32_t flags);
+void om_slot_set_flags(OmSlabSlot *slot, uint16_t flags);
+void om_slot_set_parent_idx(OmSlabSlot *slot, uint32_t parent_idx);
 
 /* Slot index utilities (only for fixed slab A) */
 uint32_t om_slot_get_idx(const OmDualSlab *slab, const OmSlabSlot *slot);
 OmSlabSlot *om_slot_from_idx(const OmDualSlab *slab, uint32_t idx);
+
+/* Queue utilities for managing intrusive lists
+ * These functions operate on a specific queue index (q_idx) within slots
+ * Typical usage: Q1=price ladder, Q2=time FIFO, Q3=org queue
+ */
+
+/* Check if slot is linked in a queue */
+static inline bool om_queue_is_linked(const OmSlabSlot *slot, int q_idx) {
+    return (slot->queue_nodes[q_idx].next_idx != OM_SLOT_IDX_NULL ||
+            slot->queue_nodes[q_idx].prev_idx != OM_SLOT_IDX_NULL);
+}
+
+/* Link slot after another slot in queue q_idx */
+static inline void om_queue_link_after(OmDualSlab *slab, OmSlabSlot *prev, 
+                                        OmSlabSlot *slot, int q_idx) {
+    uint32_t prev_idx = om_slot_get_idx(slab, prev);
+    uint32_t slot_idx = om_slot_get_idx(slab, slot);
+    uint32_t next_idx = prev->queue_nodes[q_idx].next_idx;
+    
+    slot->queue_nodes[q_idx].prev_idx = prev_idx;
+    slot->queue_nodes[q_idx].next_idx = next_idx;
+    prev->queue_nodes[q_idx].next_idx = slot_idx;
+    
+    if (next_idx != OM_SLOT_IDX_NULL) {
+        OmSlabSlot *next = om_slot_from_idx(slab, next_idx);
+        if (next) next->queue_nodes[q_idx].prev_idx = slot_idx;
+    }
+}
+
+/* Link slot before another slot in queue q_idx */
+static inline void om_queue_link_before(OmDualSlab *slab, OmSlabSlot *next,
+                                         OmSlabSlot *slot, int q_idx) {
+    uint32_t next_idx = om_slot_get_idx(slab, next);
+    uint32_t slot_idx = om_slot_get_idx(slab, slot);
+    uint32_t prev_idx = next->queue_nodes[q_idx].prev_idx;
+    
+    slot->queue_nodes[q_idx].next_idx = next_idx;
+    slot->queue_nodes[q_idx].prev_idx = prev_idx;
+    next->queue_nodes[q_idx].prev_idx = slot_idx;
+    
+    if (prev_idx != OM_SLOT_IDX_NULL) {
+        OmSlabSlot *prev = om_slot_from_idx(slab, prev_idx);
+        if (prev) prev->queue_nodes[q_idx].next_idx = slot_idx;
+    }
+}
+
+/* Unlink slot from queue q_idx. Returns true if slot was linked. */
+static inline bool om_queue_unlink(OmDualSlab *slab, OmSlabSlot *slot, int q_idx) {
+    uint32_t next_idx = slot->queue_nodes[q_idx].next_idx;
+    uint32_t prev_idx = slot->queue_nodes[q_idx].prev_idx;
+    
+    if (next_idx == OM_SLOT_IDX_NULL && prev_idx == OM_SLOT_IDX_NULL) {
+        return false;  /* Not linked */
+    }
+    
+    /* Update previous node's next pointer */
+    if (prev_idx != OM_SLOT_IDX_NULL) {
+        OmSlabSlot *prev = om_slot_from_idx(slab, prev_idx);
+        if (prev) prev->queue_nodes[q_idx].next_idx = next_idx;
+    }
+    
+    /* Update next node's prev pointer */
+    if (next_idx != OM_SLOT_IDX_NULL) {
+        OmSlabSlot *next = om_slot_from_idx(slab, next_idx);
+        if (next) next->queue_nodes[q_idx].prev_idx = prev_idx;
+    }
+    
+    /* Clear slot's links */
+    slot->queue_nodes[q_idx].next_idx = OM_SLOT_IDX_NULL;
+    slot->queue_nodes[q_idx].prev_idx = OM_SLOT_IDX_NULL;
+    
+    return true;
+}
 
 #endif
