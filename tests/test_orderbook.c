@@ -263,8 +263,8 @@ START_TEST(test_orderbook_cancel)
     /* Verify order is there */
     ck_assert_uint_eq(om_orderbook_get_best_bid(&ctx, 0), 10000);
 
-    /* Cancel the order using order_id */
-    bool cancelled = om_orderbook_cancel(&ctx, 0, order_id);
+    /* Cancel the order using only order_id (product_id is stored in hashmap) */
+    bool cancelled = om_orderbook_cancel(&ctx, order_id);
     ck_assert(cancelled);
 
     /* Verify order is gone from orderbook */
@@ -320,8 +320,8 @@ START_TEST(test_orderbook_cancel_partial)
     ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&ctx, order_id1));
     ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&ctx, order_id2));
 
-    /* Cancel first order using order_id */
-    bool cancelled = om_orderbook_cancel(&ctx, 0, order_id1);
+    /* Cancel first order using only order_id */
+    bool cancelled = om_orderbook_cancel(&ctx, order_id1);
     ck_assert(cancelled);
 
     /* Verify price level still exists with remaining volume */
@@ -403,8 +403,8 @@ START_TEST(test_orderbook_hashmap_lookup)
     ck_assert_uint_eq(found->price, 10000);
     ck_assert_uint_eq(found->volume, 100);
 
-    /* Cancel the order */
-    bool cancelled = om_orderbook_cancel(&ctx, 0, order_id);
+    /* Cancel the order using only order_id */
+    bool cancelled = om_orderbook_cancel(&ctx, order_id);
     ck_assert(cancelled);
 
     /* Verify order is no longer in hashmap */

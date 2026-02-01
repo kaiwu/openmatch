@@ -12,7 +12,7 @@
 typedef struct OmOrderbookContext {
     OmDualSlab slab;                    /**< Dual slab allocator for all orders */
     OmProductBook products[OM_MAX_PRODUCTS]; /**< Array of product orderbooks */
-    OmHashMap *order_hashmap;           /**< Hashmap: order_id -> slot index */
+    OmHashMap *order_hashmap;           /**< Hashmap: order_id -> OmOrderEntry */
     uint32_t next_slot_idx;             /**< Next slot index hint for Q0 */
 } OmOrderbookContext;
 
@@ -51,15 +51,14 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
 
 /**
  * Cancel order from orderbook using order ID
- * Looks up order in hashmap and removes from all queues
+ * Looks up order in hashmap (which contains product_id) and removes from all queues
  * 
  * @param ctx Orderbook context
- * @param product_id Product ID (0-65535)
  * @param order_id Order ID to cancel (as returned by om_slab_next_order_id)
  * @return true if cancelled, false if not found
  * 
  * Operations:
- * - Look up slot from order_id in hashmap
+ * - Look up slot_idx and product_id from order_id in hashmap
  * - Remove from time queue Q2
  * - If last order at price level, remove price level from Q1
  * - Remove from org queue Q3
@@ -67,8 +66,7 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
  * - Remove from hashmap
  * - Free slot back to slab
  */
-bool om_orderbook_cancel(OmOrderbookContext *ctx, uint16_t product_id,
-                         uint32_t order_id);
+bool om_orderbook_cancel(OmOrderbookContext *ctx, uint32_t order_id);
 
 /**
  * Get best bid price for product (O(1))

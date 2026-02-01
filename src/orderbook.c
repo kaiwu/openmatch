@@ -227,10 +227,6 @@ static void remove_price_level(OmOrderbookContext *ctx, uint16_t product_id,
 int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
                         OmSlabSlot *order)
 {
-    if (!ctx || !order) {
-        return -1;
-    }
-
     uint64_t price = order->price;
     bool is_bid = OM_IS_BID(order->flags);
 
@@ -255,29 +251,27 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
 
     /* Add order to hashmap for O(1) lookup by order_id */
     uint32_t slot_idx = om_slot_get_idx(&ctx->slab, order);
-    om_hash_insert(ctx->order_hashmap, order->order_id, slot_idx);
+    OmOrderEntry entry = {
+        .slot_idx = slot_idx,
+        .product_id = product_id
+    };
+    om_hash_insert(ctx->order_hashmap, order->order_id, entry);
 
     return 0;
 }
 
-bool om_orderbook_cancel(OmOrderbookContext *ctx, uint16_t product_id,
-                         uint32_t order_id)
+bool om_orderbook_cancel(OmOrderbookContext *ctx, uint32_t order_id)
 {
-    if (!ctx) {
-        return false;
-    }
-
-    /* Look up order slot index from hashmap */
-    uint32_t slot_idx = om_hash_get(ctx->order_hashmap, order_id);
-    if (slot_idx == UINT32_MAX) {
+    /* Look up order entry from hashmap */
+    OmOrderEntry *entry = om_hash_get(ctx->order_hashmap, order_id);
+    if (!entry) {
         return false;  /* Order not found in hashmap */
     }
 
-    OmSlabSlot *order = om_slot_from_idx(&ctx->slab, slot_idx);
-    if (!order) {
-        return false;  /* Invalid slot index */
-    }
+    uint32_t slot_idx = entry->slot_idx;
+    uint16_t product_id = entry->product_id;
 
+    OmSlabSlot *order = om_slot_from_idx(&ctx->slab, slot_idx);
     uint64_t price = order->price;
     bool is_bid = OM_IS_BID(order->flags);
 
@@ -310,10 +304,6 @@ bool om_orderbook_cancel(OmOrderbookContext *ctx, uint16_t product_id,
 
 uint64_t om_orderbook_get_best_bid(const OmOrderbookContext *ctx, uint16_t product_id)
 {
-    if (!ctx || product_id >= OM_MAX_PRODUCTS) {
-        return 0;
-    }
-
     uint32_t head_idx = ctx->products[product_id].bid_head_q1;
     if (head_idx == OM_SLOT_IDX_NULL) {
         return 0;
@@ -325,10 +315,6 @@ uint64_t om_orderbook_get_best_bid(const OmOrderbookContext *ctx, uint16_t produ
 
 uint64_t om_orderbook_get_best_ask(const OmOrderbookContext *ctx, uint16_t product_id)
 {
-    if (!ctx || product_id >= OM_MAX_PRODUCTS) {
-        return 0;
-    }
-
     uint32_t head_idx = ctx->products[product_id].ask_head_q1;
     if (head_idx == OM_SLOT_IDX_NULL) {
         return 0;
@@ -342,10 +328,6 @@ uint64_t om_orderbook_get_volume_at_price(const OmOrderbookContext *ctx,
                                            uint16_t product_id, uint64_t price,
                                            bool is_bid)
 {
-    if (!ctx || product_id >= OM_MAX_PRODUCTS) {
-        return 0;
-    }
-
     OmSlabSlot *level = find_price_level((OmOrderbookContext *)ctx, product_id, price, is_bid);
     if (!level) {
         return 0;
@@ -366,27 +348,19 @@ uint64_t om_orderbook_get_volume_at_price(const OmOrderbookContext *ctx,
 
 OmSlabSlot *om_orderbook_get_slot_by_id(OmOrderbookContext *ctx, uint32_t order_id)
 {
-    if (!ctx || !ctx->order_hashmap) {
-        return NULL;
-    }
-
-    /* Look up slot index from hashmap */
-    uint32_t slot_idx = om_hash_get(ctx->order_hashmap, order_id);
-    if (slot_idx == UINT32_MAX) {
+    /* Look up order entry from hashmap */
+    OmOrderEntry *entry = om_hash_get(ctx->order_hashmap, order_id);
+    if (!entry) {
         return NULL;  /* Order not found or not active */
     }
 
-    return om_slot_from_idx(&ctx->slab, slot_idx);
+    return om_slot_from_idx(&ctx->slab, entry->slot_idx);
 }
 
 bool om_orderbook_price_level_exists(const OmOrderbookContext *ctx,
                                       uint16_t product_id, uint64_t price,
                                       bool is_bid)
 {
-    if (!ctx || product_id >= OM_MAX_PRODUCTS) {
-        return false;
-    }
-
     OmSlabSlot *level = find_price_level((OmOrderbookContext *)ctx, product_id, price, is_bid);
     return (level != NULL);
 }
@@ -394,10 +368,6 @@ bool om_orderbook_price_level_exists(const OmOrderbookContext *ctx,
 uint32_t om_orderbook_get_price_level_count(const OmOrderbookContext *ctx,
                                              uint16_t product_id, bool is_bid)
 {
-    if (!ctx || product_id >= OM_MAX_PRODUCTS) {
-        return 0;
-    }
-
     uint32_t head_idx = is_bid ? ctx->products[product_id].bid_head_q1
                                : ctx->products[product_id].ask_head_q1;
 
