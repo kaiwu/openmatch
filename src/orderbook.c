@@ -2,7 +2,7 @@
 #include "om_wal.h"
 #include <string.h>
 
-int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config)
+int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal)
 {
     int ret = om_slab_init(&ctx->slab, config);
     if (ret != 0) {
@@ -23,11 +23,18 @@ int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config)
     }
 
     ctx->next_slot_idx = 0;
+    ctx->wal = wal;  /* Store WAL pointer (can be NULL) */
     return 0;
 }
 
 void om_orderbook_destroy(OmOrderbookContext *ctx)
 {
+    /* Flush and sync WAL if enabled to ensure durability */
+    if (ctx->wal) {
+        om_wal_flush(ctx->wal);
+        om_wal_fsync(ctx->wal);
+    }
+
     if (ctx->order_hashmap) {
         om_hash_destroy(ctx->order_hashmap);
         ctx->order_hashmap = NULL;
@@ -246,6 +253,11 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
     };
     om_hash_insert(ctx->order_hashmap, order->order_id, entry);
 
+    /* Log to WAL if enabled */
+    if (ctx->wal) {
+        om_wal_insert(ctx->wal, order, product_id);
+    }
+
     return 0;
 }
 
@@ -259,6 +271,11 @@ bool om_orderbook_cancel(OmOrderbookContext *ctx, uint32_t order_id)
 
     uint32_t slot_idx = entry->slot_idx;
     uint16_t product_id = entry->product_id;
+
+    /* Log to WAL if enabled (before removing from hashmap) */
+    if (ctx->wal) {
+        om_wal_cancel(ctx->wal, order_id, slot_idx, product_id);
+    }
 
     OmSlabSlot *order = om_slot_from_idx(&ctx->slab, slot_idx);
     uint64_t price = order->price;

@@ -3,7 +3,11 @@
 
 #include "om_slab.h"
 #include "om_hash.h"
+#include "om_wal.h"
 #include <stdint.h>
+
+/* Forward declaration for WAL */
+struct OmWal;
 
 /**
  * Orderbook context - manages all orderbooks across products
@@ -14,15 +18,17 @@ typedef struct OmOrderbookContext {
     OmProductBook products[OM_MAX_PRODUCTS]; /**< Array of product orderbooks */
     OmHashMap *order_hashmap;           /**< Hashmap: order_id -> OmOrderEntry */
     uint32_t next_slot_idx;             /**< Next slot index hint for Q0 */
+    struct OmWal *wal;                  /**< Optional WAL for durability (NULL if disabled) */
 } OmOrderbookContext;
 
 /**
  * Initialize orderbook context
  * @param ctx Context to initialize
  * @param config Slab configuration
+ * @param wal Optional WAL pointer for durability (NULL if not enabled)
  * @return 0 on success, negative on error
  */
-int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config);
+int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal);
 
 /**
  * Destroy orderbook context and free all resources
