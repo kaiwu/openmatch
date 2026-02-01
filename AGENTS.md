@@ -5,6 +5,40 @@
 - **Build System**: CMake (3.15+)
 - **Outputs**: Shared library (.so/.dll/.dylib) and Static library (.a/.lib)
 - **Standard**: ISO C11 with POSIX extensions where needed
+- **Dependencies**: klib (git submodule)
+
+## Git Submodules
+
+This project uses **klib** as a git submodule for data structures and utilities.
+
+### Cloning with Submodules
+```bash
+# Clone with all submodules
+git clone --recursive https://github.com/yourusername/openmatch.git
+
+# Or if already cloned without --recursive
+git submodule update --init --recursive
+```
+
+### Updating Submodules
+```bash
+# Update klib to latest version
+cd deps/klib && git pull origin master && cd ../..
+git add deps/klib
+git commit -m "Update klib to latest"
+```
+
+### Check Testing Framework
+
+The project uses **check** as a git submodule for unit testing.
+
+```bash
+# The check submodule is automatically initialized with:
+git submodule update --init --recursive
+
+# Or manually:
+git submodule add https://github.com/libcheck/check.git deps/check
+```
 
 ## Build Commands
 
@@ -30,6 +64,8 @@ make -j$(nproc)
 
 ## Test Commands
 
+The tests use the **check** testing framework.
+
 ### Run All Tests
 ```bash
 cd build && ctest --output-on-failure
@@ -54,6 +90,8 @@ cd build && ctest -T memcheck
 - Tests are in `tests/` directory
 - Test files follow pattern: `test_*.c`
 - Each test file creates a standalone executable
+- Tests are organized in suites (slab_suite, engine_suite)
+- ctest runs the test_runner which executes all test suites
 - Current tests:
   - `tests/test_slab.c` - Slab allocator tests (intrusive queues, dual slabs)
   - `tests/test_engine.c` - Matching engine tests (orderbook, products)
@@ -135,8 +173,18 @@ cppcheck --enable=all --suppress=missingIncludeSystem src/
 .
 ├── AGENTS.md              # This file - coding guidelines for AI agents
 ├── CMakeLists.txt
+├── .gitmodules            # Git submodule configuration
+├── deps/
+│   ├── klib/              # Git submodule - klib library
+│   │   ├── khash.h       # Hash map
+│   │   ├── khashl.h      # Lightweight hash map
+│   │   ├── kbtree.h      # B-tree
+│   │   ├── kavl.h        # AVL tree
+│   │   ├── klist.h       # Linked list
+│   │   ├── kdq.h         # Queue
+│   │   └── ...           # 30+ headers
+│   └── check/             # Git submodule - check testing framework
 ├── include/
-│   ├── khash.h           # klib hash map (single header)
 │   └── openmatch/
 │       ├── om_slab.h     # Slab allocator public API
 │       ├── om_hash.h     # Hashmap interface
@@ -144,8 +192,8 @@ cppcheck --enable=all --suppress=missingIncludeSystem src/
 ├── src/
 │   ├── CMakeLists.txt
 │   ├── om_slab.c         # Slab allocator implementation
-│   ├── om_hash_khash.c   # khash backend
-│   ├── om_hash_f14.c     # F14 backend (opt-in)
+│   ├── om_hash_khash.c   # khash backend (default)
+│   ├── om_hash_khashl.c  # khashl backend (opt-in)
 │   └── om_engine.c       # Matching engine implementation
 ├── tests/
 │   ├── CMakeLists.txt

@@ -5,13 +5,26 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "../khash.h"
-
+#ifdef OM_USE_KHASHL
+#include "khashl.h"
+/* Instantiate khashl hash table type with uint64_t keys and void* values.
+ * This must be in the header so all users see the complete type definition.
+ * Functions are declared static to avoid multiple definition errors. */
+KHASHL_MAP_INIT(static, khl_t, khl, uint64_t, void*, kh_hash_uint64, kh_eq_generic)
+typedef struct OmHashMap {
+    khl_t *hash;
+} OmHashMap;
+/* Compatibility macros for khash API - khashl already provides kh_val, kh_key, kh_end, kh_exist */
+#define khiter_t khint_t
+#define kh_begin(h) 0
+#define kh_value(h, x) kh_val(h, x)
+#else
+#include "khash.h"
 KHASH_MAP_INIT_INT64(ptr, void*)
-
 typedef struct OmHashMap {
     khash_t(ptr) *hash;
 } OmHashMap;
+#endif
 
 OmHashMap *om_hash_create(size_t initial_capacity);
 void om_hash_destroy(OmHashMap *map);

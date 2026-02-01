@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include "openmatch/om_slab.h"
+#include "../include/openmatch/om_slab.h"
 
 static inline size_t align_up(size_t size, size_t align) {
     return (size + align - 1) & ~(align - 1);

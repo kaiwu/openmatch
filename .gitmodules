@@ -1,0 +1,6 @@
+[submodule "deps/klib"]
+	path = deps/klib
+	url = https://github.com/attractivechaos/klib.git
+[submodule "deps/check"]
+	path = deps/check
+	url = https://github.com/libcheck/check.git

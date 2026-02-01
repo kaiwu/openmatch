@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include "openmatch/om_engine.h"
+#include "../include/openmatch/om_engine.h"
 
 int om_engine_init(OmEngine *engine) {
     if (!engine) return -1;

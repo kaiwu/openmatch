@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
-option(ENABLE_F14 "Use F14 hash map backend instead of khash" OFF)
+option(USE_KHASHL "Use khashl hash map backend instead of khash" OFF)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -18,7 +18,9 @@ set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR}/include/openmatch)
+include_directories(${CMAKE_SOURCE_DIR}/deps/klib)
 
+add_subdirectory(deps/check)
 add_subdirectory(src)
 
 enable_testing()

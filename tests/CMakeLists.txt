@@ -1,13 +1,13 @@
 find_package(Threads REQUIRED)
 
 set(TEST_SOURCES
+    test_runner.c
     test_slab.c
     test_engine.c
 )
 
-foreach(test_source ${TEST_SOURCES})
-    get_filename_component(test_name ${test_source} NAME_WE)
-    add_executable(${test_name} ${test_source})
-    target_link_libraries(${test_name} openmatch Threads::Threads)
-    add_test(NAME ${test_name} COMMAND ${test_name})
-endforeach()
+add_executable(test_runner ${TEST_SOURCES})
+target_link_libraries(test_runner openmatch check Threads::Threads)
+target_include_directories(test_runner PRIVATE ${CMAKE_SOURCE_DIR}/deps/check/src ${CMAKE_BINARY_DIR}/deps/check)
+
+add_test(NAME test_runner COMMAND test_runner)

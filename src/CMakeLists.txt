@@ -3,16 +3,13 @@ set(OPENMATCH_SOURCES
     om_engine.c
 )
 
-if(ENABLE_F14)
-    list(APPEND OPENMATCH_SOURCES om_hash_f14.c)
-else()
-    list(APPEND OPENMATCH_SOURCES om_hash_khash.c)
-endif()
-
 add_library(openmatch ${OPENMATCH_SOURCES})
 
-if(ENABLE_F14)
-    target_compile_definitions(openmatch PRIVATE OM_USE_F14)
+if(USE_KHASHL)
+    target_compile_definitions(openmatch PRIVATE OM_USE_KHASHL)
+    target_sources(openmatch PRIVATE om_hash_khashl.c)
+else()
+    target_sources(openmatch PRIVATE om_hash_khash.c)
 endif()
 
 target_include_directories(openmatch
