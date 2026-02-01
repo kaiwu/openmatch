@@ -36,23 +36,44 @@ void om_orderbook_destroy(OmOrderbookContext *ctx)
 
 /**
  * Find price level in Q1 for given product and price
- * Returns pointer to price level slot, or NULL if not found
+ * Returns pointer to price level slot if found, NULL if not found
+ * When not found, *insert_after is set to the node after which to insert
+ * (NULL means insert at head, otherwise insert after this node)
  */
-static OmSlabSlot *find_price_level(OmOrderbookContext *ctx, uint16_t product_id,
-                                     uint64_t price, bool is_bid)
+static OmSlabSlot *find_price_level_with_insertion_point(OmOrderbookContext *ctx, 
+                                                          uint16_t product_id,
+                                                          uint64_t price, 
+                                                          bool is_bid,
+                                                          OmSlabSlot **insert_after)
 {
     OmProductBook *book = &ctx->products[product_id];
     uint32_t head_idx = is_bid ? book->bid_head_q1 : book->ask_head_q1;
 
     if (head_idx == OM_SLOT_IDX_NULL) {
+        *insert_after = NULL;
+        return NULL;
+    }
+
+    OmSlabSlot *head = om_slot_from_idx(&ctx->slab, head_idx);
+    
+    /* Check if we need to insert at head (new best price) */
+    if (is_bid && price > head->price) {
+        *insert_after = NULL;  /* Insert at head */
+        return NULL;
+    }
+    if (!is_bid && price < head->price) {
+        *insert_after = NULL;  /* Insert at head */
         return NULL;
     }
 
     /* Scan through Q1 price ladder */
     uint32_t curr_idx = head_idx;
+    OmSlabSlot *curr = head;
+    OmSlabSlot *prev = NULL;
+
     while (curr_idx != OM_SLOT_IDX_NULL) {
-        OmSlabSlot *curr = om_slot_from_idx(&ctx->slab, curr_idx);
         if (curr->price == price) {
+            *insert_after = NULL;  /* Not used when found */
             return curr;  /* Found exact price level */
         }
 
@@ -60,24 +81,34 @@ static OmSlabSlot *find_price_level(OmOrderbookContext *ctx, uint16_t product_id
          * For asks: scan ascending, stop when price > target
          */
         if (is_bid && curr->price < price) {
-            break;  /* Gone too far down in bid ladder */
+            *insert_after = prev;  /* Insert after previous */
+            return NULL;
         }
         if (!is_bid && curr->price > price) {
-            break;  /* Gone too far up in ask ladder */
+            *insert_after = prev;  /* Insert after previous */
+            return NULL;
         }
 
+        prev = curr;
         curr_idx = curr->queue_nodes[OM_Q1_PRICE_LADDER].next_idx;
+        if (curr_idx != OM_SLOT_IDX_NULL) {
+            curr = om_slot_from_idx(&ctx->slab, curr_idx);
+        }
     }
 
-    return NULL;  /* Price level not found */
+    /* Reached end - insert at tail */
+    *insert_after = prev;
+    return NULL;
 }
 
 /**
- * Insert new price level into Q1 at correct position
+ * Insert new price level into Q1 at given position
  * Price level slots have volume=0 to distinguish from real orders
+ * insert_after: NULL = insert at head, otherwise insert after this node
  */
-static OmSlabSlot *insert_price_level(OmOrderbookContext *ctx, uint16_t product_id,
-                                       uint64_t price, bool is_bid)
+static OmSlabSlot *insert_price_level_at(OmOrderbookContext *ctx, uint16_t product_id,
+                                          uint64_t price, bool is_bid,
+                                          OmSlabSlot *insert_after)
 {
     OmProductBook *book = &ctx->products[product_id];
     uint32_t *head_idx = is_bid ? &book->bid_head_q1 : &book->ask_head_q1;
@@ -106,62 +137,18 @@ static OmSlabSlot *insert_price_level(OmOrderbookContext *ctx, uint16_t product_
 
     uint32_t level_idx = om_slot_get_idx(&ctx->slab, level);
 
-    /* Find insertion point in Q1 */
-    if (*head_idx == OM_SLOT_IDX_NULL) {
-        /* Empty book - new level becomes head */
-        *head_idx = level_idx;
-        return level;
-    }
-
-    OmSlabSlot *head = om_slot_from_idx(&ctx->slab, *head_idx);
-
-    /* Check if new level should be new head */
-    if (is_bid && price > head->price) {
-        /* New bid level is better than current best */
-        level->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = *head_idx;
-        head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = level_idx;
-        *head_idx = level_idx;
-        return level;
-    }
-
-    if (!is_bid && price < head->price) {
-        /* New ask level is better than current best */
-        level->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = *head_idx;
-        head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = level_idx;
-        *head_idx = level_idx;
-        return level;
-    }
-
-    /* Scan to find insertion point */
-    uint32_t curr_idx = *head_idx;
-    OmSlabSlot *curr = head;
-
-    while (curr_idx != OM_SLOT_IDX_NULL) {
-        uint32_t next_idx = curr->queue_nodes[OM_Q1_PRICE_LADDER].next_idx;
-
-        if (next_idx == OM_SLOT_IDX_NULL) {
-            /* Reached end - insert here */
-            om_queue_link_after(&ctx->slab, curr, level, OM_Q1_PRICE_LADDER);
-            return level;
+    /* Insert at the specified position */
+    if (insert_after == NULL) {
+        /* Insert at head */
+        if (*head_idx != OM_SLOT_IDX_NULL) {
+            OmSlabSlot *old_head = om_slot_from_idx(&ctx->slab, *head_idx);
+            level->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = *head_idx;
+            old_head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = level_idx;
         }
-
-        OmSlabSlot *next = om_slot_from_idx(&ctx->slab, next_idx);
-
-        /* For bids: insert while price >= next price (descending)
-         * For asks: insert while price <= next price (ascending)
-         */
-        if (is_bid && price >= next->price) {
-            om_queue_link_after(&ctx->slab, curr, level, OM_Q1_PRICE_LADDER);
-            return level;
-        }
-
-        if (!is_bid && price <= next->price) {
-            om_queue_link_after(&ctx->slab, curr, level, OM_Q1_PRICE_LADDER);
-            return level;
-        }
-
-        curr_idx = next_idx;
-        curr = next;
+        *head_idx = level_idx;
+    } else {
+        /* Insert after the given node */
+        om_queue_link_after(&ctx->slab, insert_after, level, OM_Q1_PRICE_LADDER);
     }
 
     return level;
@@ -231,11 +218,12 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
     bool is_bid = OM_IS_BID(order->flags);
 
     /* Find or create price level in Q1 */
-    OmSlabSlot *level = find_price_level(ctx, product_id, price, is_bid);
+    OmSlabSlot *insert_after = NULL;
+    OmSlabSlot *level = find_price_level_with_insertion_point(ctx, product_id, price, is_bid, &insert_after);
 
     if (!level) {
-        /* Create new price level */
-        level = insert_price_level(ctx, product_id, price, is_bid);
+        /* Create new price level at the identified insertion point */
+        level = insert_price_level_at(ctx, product_id, price, is_bid, insert_after);
         if (!level) {
             return -1;  /* Out of memory */
         }
@@ -275,8 +263,9 @@ bool om_orderbook_cancel(OmOrderbookContext *ctx, uint32_t order_id)
     uint64_t price = order->price;
     bool is_bid = OM_IS_BID(order->flags);
 
-    /* Find the price level */
-    OmSlabSlot *level = find_price_level(ctx, product_id, price, is_bid);
+    /* Find the price level - for cancel we only need lookup, not insertion point */
+    OmSlabSlot *unused = NULL;
+    OmSlabSlot *level = find_price_level_with_insertion_point(ctx, product_id, price, is_bid, &unused);
     if (!level) {
         return false;  /* Price level not found */
     }
@@ -328,7 +317,8 @@ uint64_t om_orderbook_get_volume_at_price(const OmOrderbookContext *ctx,
                                            uint16_t product_id, uint64_t price,
                                            bool is_bid)
 {
-    OmSlabSlot *level = find_price_level((OmOrderbookContext *)ctx, product_id, price, is_bid);
+    OmSlabSlot *unused = NULL;
+    OmSlabSlot *level = find_price_level_with_insertion_point((OmOrderbookContext *)ctx, product_id, price, is_bid, &unused);
     if (!level) {
         return 0;
     }
@@ -361,7 +351,8 @@ bool om_orderbook_price_level_exists(const OmOrderbookContext *ctx,
                                       uint16_t product_id, uint64_t price,
                                       bool is_bid)
 {
-    OmSlabSlot *level = find_price_level((OmOrderbookContext *)ctx, product_id, price, is_bid);
+    OmSlabSlot *unused = NULL;
+    OmSlabSlot *level = find_price_level_with_insertion_point((OmOrderbookContext *)ctx, product_id, price, is_bid, &unused);
     return (level != NULL);
 }
 
