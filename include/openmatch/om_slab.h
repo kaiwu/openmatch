@@ -11,6 +11,39 @@
 #define OM_SLAB_B_SIZE 256
 #define OM_SLOT_IDX_NULL UINT32_MAX
 
+/* Order side (1 bit) - bit 0 */
+#define OM_SIDE_BID     0x00000000U  /**< Bit 0 = 0: Buy side */
+#define OM_SIDE_ASK     0x00000001U  /**< Bit 0 = 1: Sell side */
+#define OM_SIDE_MASK    0x00000001U
+
+/* Order type (4 bits) - bits 1-4 */
+#define OM_TYPE_LIMIT   0x00000000U  /**< Bits 1-4 = 0: Limit order */
+#define OM_TYPE_MARKET  0x00000002U  /**< Bits 1-4 = 1: Market order */
+#define OM_TYPE_IOC     0x00000004U  /**< Bits 1-4 = 2: Immediate or Cancel */
+#define OM_TYPE_FOK     0x00000006U  /**< Bits 1-4 = 3: Fill or Kill */
+#define OM_TYPE_GTC     0x00000008U  /**< Bits 1-4 = 4: Good Till Cancelled */
+#define OM_TYPE_MASK    0x0000001EU  /**< Bits 1-4 mask */
+
+/* Order status (3 bits) - bits 5-7 */
+#define OM_STATUS_NEW       0x00000000U  /**< Bits 5-7 = 0: New order */
+#define OM_STATUS_PARTIAL   0x00000020U  /**< Bits 5-7 = 1: Partially filled */
+#define OM_STATUS_FILLED    0x00000040U  /**< Bits 5-7 = 2: Fully filled */
+#define OM_STATUS_CANCELLED 0x00000060U  /**< Bits 5-7 = 3: Cancelled */
+#define OM_STATUS_REJECTED  0x00000080U  /**< Bits 5-7 = 4: Rejected */
+#define OM_STATUS_MASK      0x000000E0U  /**< Bits 5-7 mask */
+
+/* Bit manipulation helpers */
+#define OM_SET_SIDE(flags, side)    (((flags) & ~OM_SIDE_MASK) | ((side) & OM_SIDE_MASK))
+#define OM_SET_TYPE(flags, type)    (((flags) & ~OM_TYPE_MASK) | ((type) & OM_TYPE_MASK))
+#define OM_SET_STATUS(flags, status) (((flags) & ~OM_STATUS_MASK) | ((status) & OM_STATUS_MASK))
+
+#define OM_GET_SIDE(flags)          ((flags) & OM_SIDE_MASK)
+#define OM_GET_TYPE(flags)          ((flags) & OM_TYPE_MASK)
+#define OM_GET_STATUS(flags)        ((flags) & OM_STATUS_MASK)
+
+#define OM_IS_BID(flags)            (((flags) & OM_SIDE_MASK) == OM_SIDE_BID)
+#define OM_IS_ASK(flags)            (((flags) & OM_SIDE_MASK) == OM_SIDE_ASK)
+
 typedef struct OmSlabSlot OmSlabSlot;
 
 typedef struct OmIntrusiveNode {
@@ -58,13 +91,6 @@ typedef struct OmDualSlab {
     size_t user_data_size;   /**< Size of user-defined payload per slot */
 } OmDualSlab;
 
-typedef struct OmQueue {
-    uint32_t head_idx;  /**< Head slot index (always in fixed slab) */
-    uint32_t tail_idx;  /**< Tail slot index (always in fixed slab) */
-    size_t size;
-    int queue_id;
-} OmQueue;
-
 int om_slab_init(OmDualSlab *slab, size_t user_data_size);
 void om_slab_destroy(OmDualSlab *slab);
 
@@ -94,11 +120,5 @@ void om_slot_set_flags(OmSlabSlot *slot, uint32_t flags);
 /* Slot index utilities (only for fixed slab A) */
 uint32_t om_slot_get_idx(const OmDualSlab *slab, const OmSlabSlot *slot);
 OmSlabSlot *om_slot_from_idx(const OmDualSlab *slab, uint32_t idx);
-
-int om_queue_init(OmQueue *queue, int queue_id);
-void om_queue_push(OmQueue *queue, OmDualSlab *slab, OmSlabSlot *slot, int queue_idx);
-OmSlabSlot *om_queue_pop(OmQueue *queue, OmDualSlab *slab, int queue_idx);
-void om_queue_remove(OmQueue *queue, OmDualSlab *slab, OmSlabSlot *slot, int queue_idx);
-bool om_queue_is_empty(const OmQueue *queue);
 
 #endif

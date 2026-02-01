@@ -30,7 +30,7 @@ static inline bool slot_in_slab_a(const OmDualSlab *slab, const OmSlabSlot *slot
     return slot_addr >= a_start && slot_addr < a_end;
 }
 
-/* Get slot index within slab A (queues only work in slab A) */
+/* Get slot index within slab A */
 uint32_t om_slot_get_idx(const OmDualSlab *slab, const OmSlabSlot *slot) {
     if (!slab || !slot) return OM_SLOT_IDX_NULL;
     return slot_to_idx_a(&slab->slab_a, slot);
@@ -249,161 +249,52 @@ void *om_slot_get_data(OmSlabSlot *slot) {
     return slot->data;
 }
 
-int om_queue_init(OmQueue *queue, int queue_id) {
-    if (!queue || queue_id < 0 || queue_id >= OM_MAX_QUEUES) {
-        return -1;
-    }
-
-    queue->head_idx = OM_SLOT_IDX_NULL;
-    queue->tail_idx = OM_SLOT_IDX_NULL;
-    queue->size = 0;
-    queue->queue_id = queue_id;
-    return 0;
-}
-
-void om_queue_push(OmQueue *queue, OmDualSlab *slab, OmSlabSlot *slot, int queue_idx) {
-    if (!queue || !slab || !slot || queue_idx < 0 || queue_idx >= OM_MAX_QUEUES) return;
-
-    OmIntrusiveNode *node = &slot->queue_nodes[queue_idx];
-
-    /* Check if already in queue */
-    if (node->next_idx != OM_SLOT_IDX_NULL || node->prev_idx != OM_SLOT_IDX_NULL || 
-        queue->head_idx == om_slot_get_idx(slab, slot)) {
-        return;
-    }
-
-    uint32_t slot_idx = om_slot_get_idx(slab, slot);
-    if (slot_idx == OM_SLOT_IDX_NULL) return;
-
-    node->next_idx = OM_SLOT_IDX_NULL;
-    node->prev_idx = queue->tail_idx;
-
-    if (queue->tail_idx != OM_SLOT_IDX_NULL) {
-        OmSlabSlot *tail_slot = om_slot_from_idx(slab, queue->tail_idx);
-        if (tail_slot) {
-            tail_slot->queue_nodes[queue_idx].next_idx = slot_idx;
-        }
-    } else {
-        queue->head_idx = slot_idx;
-    }
-    queue->tail_idx = slot_idx;
-    queue->size++;
-}
-
-OmSlabSlot *om_queue_pop(OmQueue *queue, OmDualSlab *slab, int queue_idx) {
-    if (!queue || !slab || queue_idx < 0 || queue_idx >= OM_MAX_QUEUES) return NULL;
-
-    if (queue->head_idx == OM_SLOT_IDX_NULL) return NULL;
-
-    OmSlabSlot *slot = om_slot_from_idx(slab, queue->head_idx);
-    if (!slot) return NULL;
-
-    OmIntrusiveNode *node = &slot->queue_nodes[queue_idx];
-    queue->head_idx = node->next_idx;
-    if (queue->head_idx != OM_SLOT_IDX_NULL) {
-        OmSlabSlot *new_head = om_slot_from_idx(slab, queue->head_idx);
-        if (new_head) {
-            new_head->queue_nodes[queue_idx].prev_idx = OM_SLOT_IDX_NULL;
-        }
-    } else {
-        queue->tail_idx = OM_SLOT_IDX_NULL;
-    }
-
-    node->next_idx = OM_SLOT_IDX_NULL;
-    node->prev_idx = OM_SLOT_IDX_NULL;
-    queue->size--;
-
-    return slot;
-}
-
-void om_queue_remove(OmQueue *queue, OmDualSlab *slab, OmSlabSlot *slot, int queue_idx) {
-    if (!queue || !slab || !slot || queue_idx < 0 || queue_idx >= OM_MAX_QUEUES) return;
-
-    OmIntrusiveNode *node = &slot->queue_nodes[queue_idx];
-    uint32_t slot_idx = om_slot_get_idx(slab, slot);
-
-    /* Check if actually in queue */
-    if (node->next_idx == OM_SLOT_IDX_NULL && node->prev_idx == OM_SLOT_IDX_NULL && 
-        queue->head_idx != slot_idx) {
-        return;
-    }
-
-    /* Update previous node */
-    if (node->prev_idx != OM_SLOT_IDX_NULL) {
-        OmSlabSlot *prev_slot = om_slot_from_idx(slab, node->prev_idx);
-        if (prev_slot) {
-            prev_slot->queue_nodes[queue_idx].next_idx = node->next_idx;
-        }
-    } else {
-        queue->head_idx = node->next_idx;
-    }
-
-    /* Update next node */
-    if (node->next_idx != OM_SLOT_IDX_NULL) {
-        OmSlabSlot *next_slot = om_slot_from_idx(slab, node->next_idx);
-        if (next_slot) {
-            next_slot->queue_nodes[queue_idx].prev_idx = node->prev_idx;
-        }
-    } else {
-        queue->tail_idx = node->prev_idx;
-    }
-
-    node->next_idx = OM_SLOT_IDX_NULL;
-    node->prev_idx = OM_SLOT_IDX_NULL;
-    queue->size--;
-}
-
-bool om_queue_is_empty(const OmQueue *queue) {
-    if (!queue) return true;
-    return queue->size == 0;
-}
-
 /* Mandatory field getters */
 uint64_t om_slot_get_price(const OmSlabSlot *slot) {
-    return slot ? slot->price : 0;
+    return slot->price;
 }
 
 uint64_t om_slot_get_volume(const OmSlabSlot *slot) {
-    return slot ? slot->volume : 0;
+    return slot->volume;
 }
 
 uint64_t om_slot_get_volume_remain(const OmSlabSlot *slot) {
-    return slot ? slot->volume_remain : 0;
+    return slot->volume_remain;
 }
 
 uint16_t om_slot_get_org(const OmSlabSlot *slot) {
-    return slot ? slot->org : 0;
+    return slot->org;
 }
 
 uint16_t om_slot_get_product(const OmSlabSlot *slot) {
-    return slot ? slot->product : 0;
+    return slot->product;
 }
 
 uint32_t om_slot_get_flags(const OmSlabSlot *slot) {
-    return slot ? slot->flags : 0;
+    return slot->flags;
 }
 
 /* Mandatory field setters */
 void om_slot_set_price(OmSlabSlot *slot, uint64_t price) {
-    if (slot) slot->price = price;
+    slot->price = price;
 }
 
 void om_slot_set_volume(OmSlabSlot *slot, uint64_t volume) {
-    if (slot) slot->volume = volume;
+    slot->volume = volume;
 }
 
 void om_slot_set_volume_remain(OmSlabSlot *slot, uint64_t volume_remain) {
-    if (slot) slot->volume_remain = volume_remain;
+    slot->volume_remain = volume_remain;
 }
 
 void om_slot_set_org(OmSlabSlot *slot, uint16_t org) {
-    if (slot) slot->org = org;
+    slot->org = org;
 }
 
 void om_slot_set_product(OmSlabSlot *slot, uint16_t product) {
-    if (slot) slot->product = product;
+    slot->product = product;
 }
 
 void om_slot_set_flags(OmSlabSlot *slot, uint32_t flags) {
-    if (slot) slot->flags = flags;
+    slot->flags = flags;
 }
