@@ -49,11 +49,12 @@ cmake ..
 make -j$(nproc)
 ```
 
-### Clean Build
+### Clean Build with Tests
 ```bash
 rm -rf build && mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
+make test  # Run tests from build directory
 ```
 
 ### Debug Build
@@ -62,23 +63,76 @@ cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-g -O0" ..
 make -j$(nproc)
 ```
 
+### Sanitizer Builds (enabled by default)
+
+By default, Address Sanitizer (ASan) and Undefined Behavior Sanitizer (UBSan) are enabled. Use the options below to disable them or add Memory Sanitizer.
+
+#### Default Build (with sanitizers)
+```bash
+cd build
+cmake ..
+make -j$(nproc)
+make test
+```
+
+#### Address Sanitizer (detects memory errors)
+```bash
+cd build
+cmake -DENABLE_ASAN=OFF ..
+make -j$(nproc)
+make test
+```
+
+#### Memory Sanitizer (detects uninitialized reads) - Requires Clang
+```bash
+cd build
+CC=clang cmake -DENABLE_MSAN=ON ..
+make -j$(nproc)
+make test
+```
+
+#### Undefined Behavior Sanitizer
+```bash
+cd build
+cmake -DENABLE_UBSAN=OFF ..
+make -j$(nproc)
+make test
+```
+
+#### Combined Sanitizers (ASan + UBSan)
+```bash
+cd build
+cmake -DENABLE_ASAN=OFF -DENABLE_UBSAN=OFF ..
+make -j$(nproc)
+make test
+```
+
 ## Test Commands
+
+**IMPORTANT: All test commands must be run from the `build/` directory.**
 
 The tests use the **check** testing framework.
 
 ### Run All Tests
 ```bash
+cd build && make test
+# or
 cd build && ctest --output-on-failure
 ```
 
-### Run Single Test
+### Run Single Test Suite
 ```bash
 cd build && ctest -R <test_name> --output-on-failure
 ```
 
-### Run Specific Test Executable Directly
+### Run Test Executable Directly
 ```bash
-cd build && ./tests/test_slab
+cd build && ./tests/test_runner
+```
+
+### List Available Tests
+```bash
+cd build && ctest -N
 ```
 
 ### Run with Valgrind (if available)

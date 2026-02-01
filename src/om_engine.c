@@ -179,19 +179,22 @@ static int match_order(OmEngine *engine, OmProductBook *book, OmOrder *order,
         if (order->side == OM_SIDE_BID && best_price > order->price) break;
         if (order->side == OM_SIDE_ASK && best_price < order->price) break;
 
-        while (order->remaining > 0 && *result_count < max_results && !om_queue_is_empty(&best_level->orders)) {
+        while (order->remaining > 0 && (results == NULL || *result_count < max_results) && !om_queue_is_empty(&best_level->orders)) {
             OmSlabSlot *maker_slot = om_queue_pop(&best_level->orders, 0);
             if (!maker_slot) break;
 
             OmOrder *maker = (OmOrder *)om_slot_get_data(maker_slot);
             uint32_t match_qty = (order->remaining < maker->remaining) ? order->remaining : maker->remaining;
 
-            OmMatchResult *result = &results[(*result_count)++];
-            result->maker_order_id = maker->order_id;
-            result->taker_order_id = order->order_id;
-            result->price = best_price;
-            result->quantity = match_qty;
-            result->timestamp = get_timestamp(engine);
+            if (results != NULL) {
+                OmMatchResult *result = &results[(*result_count)];
+                result->maker_order_id = maker->order_id;
+                result->taker_order_id = order->order_id;
+                result->price = best_price;
+                result->quantity = match_qty;
+                result->timestamp = get_timestamp(engine);
+            }
+            (*result_count)++;
 
             order->remaining -= match_qty;
             maker->remaining -= match_qty;
@@ -214,7 +217,8 @@ static int match_order(OmEngine *engine, OmProductBook *book, OmOrder *order,
 
 int om_engine_place_order(OmEngine *engine, uint64_t product_id, OmOrder *order,
                           OmMatchResult *results, size_t max_results) {
-    if (!engine || !order || !results || max_results == 0) return -1;
+    if (!engine || !order) return -1;
+    if ((results == NULL) != (max_results == 0)) return -1;
 
     OmProductBook *book = om_engine_get_product(engine, product_id);
     if (!book) {
@@ -248,7 +252,7 @@ int om_engine_place_order(OmEngine *engine, uint64_t product_id, OmOrder *order,
         }
     }
 
-    if (result_count > 0) {
+    if (result_count > 0 && results != NULL) {
         book->last_price = results[result_count - 1].price;
         book->last_quantity = results[result_count - 1].quantity;
     }

@@ -303,8 +303,9 @@ START_TEST(test_price_priority)
     
     OmMatchResult results[10];
     int num_matches = om_engine_place_order(&engine, 1, &ask, results, 10);
-    ck_assert_int_eq(num_matches, 2);
+    ck_assert_int_eq(num_matches, 1);
     ck_assert_uint_eq(results[0].price, 101);  // Better price matched first
+    ck_assert_uint_eq(results[0].quantity, 5);  // Filled 5 units from bid at 101
     
     om_engine_destroy(&engine);
 }

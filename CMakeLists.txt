@@ -7,6 +7,9 @@ set(CMAKE_C_EXTENSIONS ON)
 
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(USE_KHASHL "Use khashl hash map backend instead of khash" OFF)
+option(ENABLE_ASAN "Enable Address Sanitizer" ON)
+option(ENABLE_MSAN "Enable Memory Sanitizer (requires Clang)" OFF)
+option(ENABLE_UBSAN "Enable Undefined Behavior Sanitizer" ON)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -15,6 +18,26 @@ endif()
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wpedantic")
 set(CMAKE_C_FLAGS_DEBUG "-g -O0")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
+
+# Sanitizers
+if(ENABLE_ASAN)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
+endif()
+
+if(ENABLE_MSAN)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=memory")
+    else()
+        message(WARNING "Memory Sanitizer requires Clang. Current compiler: ${CMAKE_C_COMPILER_ID}")
+    endif()
+endif()
+
+if(ENABLE_UBSAN)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=undefined -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=undefined")
+endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR}/include/openmatch)
