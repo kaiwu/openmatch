@@ -69,14 +69,9 @@ typedef struct OmSlabSlot {
     uint64_t volume_remain;  /**< Remaining volume to fill */
     uint16_t org;            /**< Organization ID */
     uint16_t flags;          /**< Order flags (type, side, etc.) - now 16-bit */
-    uint32_t parent_idx;     /**< Parent index for Q1 BST tree structure */
+    uint32_t parent_idx;     /**< Reserved for future use */
     
-    /* 4 intrusive queue nodes (32 bytes) - total 64 bytes = one cache line
-     * Note: Q1 BST uses 3 fields together:
-     *   - parent_idx (above): parent node in BST
-     *   - queue_nodes[1].next_idx: left child (lower price)
-     *   - queue_nodes[1].prev_idx: right child (higher price)
-     */
+    /* 4 intrusive queue nodes (32 bytes) - total 64 bytes = one cache line */
     OmIntrusiveNode queue_nodes[OM_MAX_QUEUES];
     
     /* User-defined payload (flexible array member) - starts at cache line 2 */
@@ -112,12 +107,13 @@ typedef struct OmDualSlab {
  * Q2 heads are per-price-level (time FIFO), stored within the slot itself
  */
 typedef struct OmProductBook {
-    /* BST root indices (Q1) - each slot is a node in the BST
-     * BST is sorted by price: bid descending, ask ascending
-     * Q1 uses: parent_idx + queue_nodes[1].next/prev as left/right children
+    /* Q1 price ladder heads - sorted linked list for O(1) best price access
+     * Bid: sorted descending (best/highest bid is head)
+     * Ask: sorted ascending (best/lowest ask is head)
+     * Insertion requires O(N) scan from head, but usually near best price
      */
-    uint32_t bid_head_q1;         /**< Root of bid price BST (best bid) */
-    uint32_t ask_head_q1;         /**< Root of ask price BST (best ask) */
+    uint32_t bid_head_q1;         /**< Head of bid price list (best bid) - O(1) access */
+    uint32_t ask_head_q1;         /**< Head of ask price list (best ask) - O(1) access */
 } OmProductBook;
 
 #define OM_MAX_PRODUCTS 65536  /**< Maximum number of products (uint16_t max) */
