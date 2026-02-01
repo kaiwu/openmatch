@@ -47,7 +47,7 @@ void om_orderbook_destroy(OmOrderbookContext *ctx);
  * @return 0 on success, negative on error
  * 
  * Operations:
- * - Find or create price level in Q1 (sorted by price)
+ * - Find or create price level head order in Q1 (sorted by price)
  * - Append to time queue Q2 at that price level
  * - Add to org queue Q3
  * - Update product book head if new best price
@@ -66,7 +66,7 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
  * Operations:
  * - Look up slot_idx and product_id from order_id in hashmap
  * - Remove from time queue Q2
- * - If last order at price level, remove price level from Q1
+ * - If cancelling price level head, promote next order or remove price level from Q1
  * - Remove from org queue Q3
  * - Update product book head if removing best price
  * - Remove from hashmap

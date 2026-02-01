@@ -46,8 +46,8 @@ void om_orderbook_destroy(OmOrderbookContext *ctx)
 }
 
 /**
- * Find price level in Q1 for given product and price
- * Returns pointer to price level slot if found, NULL if not found
+ * Find price level head order in Q1 for given product and price
+ * Returns pointer to head order if found, NULL if not found
  * When not found, *insert_after is set to the node after which to insert
  * (NULL means insert at head, otherwise insert after this node)
  */
@@ -113,98 +113,59 @@ static OmSlabSlot *find_price_level_with_insertion_point(OmOrderbookContext *ctx
 }
 
 /**
- * Insert new price level into Q1 at given position
- * Price level slots have volume=0 to distinguish from real orders
+ * Insert order as new price level head into Q1 at given position
  * insert_after: NULL = insert at head, otherwise insert after this node
  */
-static OmSlabSlot *insert_price_level_at(OmOrderbookContext *ctx, uint16_t product_id,
-                                          uint64_t price, bool is_bid,
-                                          OmSlabSlot *insert_after)
+static void insert_order_at(OmOrderbookContext *ctx, uint16_t product_id, bool is_bid,
+                            OmSlabSlot *order, OmSlabSlot *insert_after)
 {
     OmProductBook *book = &ctx->products[product_id];
     uint32_t *head_idx = is_bid ? &book->bid_head_q1 : &book->ask_head_q1;
 
-    /* Allocate price level slot */
-    OmSlabSlot *level = om_slab_alloc(&ctx->slab);
-    if (!level) {
-        return NULL;
-    }
-
-    /* Initialize price level slot
-     * volume=0 marks this as a price level, not an actual order
-     */
-    level->price = price;
-    level->volume = 0;
-    level->volume_remain = 0;
-    level->org = 0;
-    level->flags = 0;
-    level->order_id = 0;
-
-    /* Initialize all queue nodes to unlinked */
-    for (int i = 0; i < OM_MAX_QUEUES; i++) {
-        level->queue_nodes[i].next_idx = OM_SLOT_IDX_NULL;
-        level->queue_nodes[i].prev_idx = OM_SLOT_IDX_NULL;
-    }
-
-    uint32_t level_idx = om_slot_get_idx(&ctx->slab, level);
+    uint32_t order_idx = om_slot_get_idx(&ctx->slab, order);
+    order->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = OM_SLOT_IDX_NULL;
+    order->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = OM_SLOT_IDX_NULL;
 
     /* Insert at the specified position */
     if (insert_after == NULL) {
         /* Insert at head */
         if (*head_idx != OM_SLOT_IDX_NULL) {
             OmSlabSlot *old_head = om_slot_from_idx(&ctx->slab, *head_idx);
-            level->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = *head_idx;
-            old_head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = level_idx;
+            order->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = *head_idx;
+            old_head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = order_idx;
         }
-        *head_idx = level_idx;
+        *head_idx = order_idx;
     } else {
         /* Insert after the given node */
-        om_queue_link_after(&ctx->slab, insert_after, level, OM_Q1_PRICE_LADDER);
+        om_queue_link_after(&ctx->slab, insert_after, order, OM_Q1_PRICE_LADDER);
     }
-
-    return level;
 }
 
 /**
- * Append order to tail of Q2 at given price level
+ * Append order to tail of Q2 at given price level head order
  */
-static void append_to_time_queue(OmOrderbookContext *ctx, OmSlabSlot *level,
-                                  OmSlabSlot *order)
+static void append_to_time_queue(OmOrderbookContext *ctx, OmSlabSlot *head,
+                                 OmSlabSlot *order)
 {
     /* Q2: Time FIFO at this price level
-     * level's Q2 is the head (sentinel)
-     * We need to find the tail and append there
+     * head->Q2.prev holds tail index (or NULL if only head)
      */
+    uint32_t tail_idx = head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
+    OmSlabSlot *tail = head;
 
-    /* If level's Q2 is empty, this is first order */
-    if (level->queue_nodes[OM_Q2_TIME_FIFO].next_idx == OM_SLOT_IDX_NULL) {
-        uint32_t level_idx = om_slot_get_idx(&ctx->slab, level);
-        uint32_t order_idx = om_slot_get_idx(&ctx->slab, order);
-
-        level->queue_nodes[OM_Q2_TIME_FIFO].next_idx = order_idx;
-        order->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = level_idx;
-        order->queue_nodes[OM_Q2_TIME_FIFO].next_idx = OM_SLOT_IDX_NULL;
-        return;
+    if (tail_idx != OM_SLOT_IDX_NULL) {
+        tail = om_slot_from_idx(&ctx->slab, tail_idx);
     }
 
-    /* Find tail of Q2 (last order at this price) */
-    uint32_t curr_idx = level->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
-    OmSlabSlot *curr = om_slot_from_idx(&ctx->slab, curr_idx);
-
-    while (curr->queue_nodes[OM_Q2_TIME_FIFO].next_idx != OM_SLOT_IDX_NULL) {
-        curr_idx = curr->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
-        curr = om_slot_from_idx(&ctx->slab, curr_idx);
-    }
-
-    /* Append order after tail */
-    om_queue_link_after(&ctx->slab, curr, order, OM_Q2_TIME_FIFO);
+    om_queue_link_after(&ctx->slab, tail, order, OM_Q2_TIME_FIFO);
+    head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = om_slot_get_idx(&ctx->slab, order);
 }
 
 /**
- * Remove price level from Q1 and free it
+ * Remove price level head order from Q1
  */
 static void remove_price_level(OmOrderbookContext *ctx, uint16_t product_id,
-                                OmSlabSlot *level, bool is_bid)
+                               OmSlabSlot *level, bool is_bid)
 {
     OmProductBook *book = &ctx->products[product_id];
     uint32_t *head_idx = is_bid ? &book->bid_head_q1 : &book->ask_head_q1;
@@ -218,8 +179,6 @@ static void remove_price_level(OmOrderbookContext *ctx, uint16_t product_id,
     /* Unlink from Q1 */
     om_queue_unlink(&ctx->slab, level, OM_Q1_PRICE_LADDER);
 
-    /* Free the price level slot */
-    om_slab_free(&ctx->slab, level);
 }
 
 int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
@@ -228,20 +187,20 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
     uint64_t price = order->price;
     bool is_bid = OM_IS_BID(order->flags);
 
-    /* Find or create price level in Q1 */
+    /* Find price level head order in Q1 */
     OmSlabSlot *insert_after = NULL;
-    OmSlabSlot *level = find_price_level_with_insertion_point(ctx, product_id, price, is_bid, &insert_after);
+    OmSlabSlot *head = find_price_level_with_insertion_point(ctx, product_id, price, is_bid, &insert_after);
 
-    if (!level) {
-        /* Create new price level at the identified insertion point */
-        level = insert_price_level_at(ctx, product_id, price, is_bid, insert_after);
-        if (!level) {
-            return -1;  /* Out of memory */
-        }
+    if (!head) {
+        /* Insert order as new price level head */
+        insert_order_at(ctx, product_id, is_bid, order, insert_after);
+        order->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+        order->queue_nodes[OM_Q2_TIME_FIFO].next_idx = OM_SLOT_IDX_NULL;
+        head = order;
+    } else {
+        /* Append order to time queue at this price level (Q2) */
+        append_to_time_queue(ctx, head, order);
     }
-
-    /* Add order to time queue at this price level (Q2) */
-    append_to_time_queue(ctx, level, order);
 
     /* Add order to org queue (Q3) - for now, just link as simple list
      * In production, this would maintain per-org heads
@@ -284,20 +243,83 @@ bool om_orderbook_cancel(OmOrderbookContext *ctx, uint32_t order_id)
     uint64_t price = order->price;
     bool is_bid = OM_IS_BID(order->flags);
 
-    /* Find the price level - for cancel we only need lookup, not insertion point */
+    /* Find the price level head order - for cancel we only need lookup */
     OmSlabSlot *unused = NULL;
-    OmSlabSlot *level = find_price_level_with_insertion_point(ctx, product_id, price, is_bid, &unused);
-    if (!level) {
+    OmSlabSlot *head = find_price_level_with_insertion_point(ctx, product_id, price, is_bid, &unused);
+    if (!head) {
         return false;  /* Price level not found */
     }
 
-    /* Remove order from time queue Q2 */
-    om_queue_unlink(&ctx->slab, order, OM_Q2_TIME_FIFO);
+    uint32_t head_idx = om_slot_get_idx(&ctx->slab, head);
+    uint32_t next_idx = order->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
+    uint32_t prev_q2_idx = order->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
 
-    /* Check if price level is now empty (no orders in Q2) */
-    if (level->queue_nodes[OM_Q2_TIME_FIFO].next_idx == OM_SLOT_IDX_NULL) {
-        /* No more orders at this price - remove price level */
-        remove_price_level(ctx, product_id, level, is_bid);
+    if (order == head) {
+        if (next_idx == OM_SLOT_IDX_NULL) {
+            /* No more orders at this price - remove price level */
+            remove_price_level(ctx, product_id, head, is_bid);
+        } else {
+            OmProductBook *book = &ctx->products[product_id];
+            uint32_t *book_head = is_bid ? &book->bid_head_q1 : &book->ask_head_q1;
+            OmSlabSlot *next = om_slot_from_idx(&ctx->slab, next_idx);
+
+            /* Promote next to head: update Q2 head tail pointer */
+            next->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
+            if (next->queue_nodes[OM_Q2_TIME_FIFO].next_idx == OM_SLOT_IDX_NULL) {
+                /* Only one order remains at this price */
+                next->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+            }
+
+            /* Fix Q2 prev pointer of the following node */
+            if (next->queue_nodes[OM_Q2_TIME_FIFO].next_idx != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *after = om_slot_from_idx(&ctx->slab,
+                                                     next->queue_nodes[OM_Q2_TIME_FIFO].next_idx);
+                if (after) {
+                    after->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = om_slot_get_idx(&ctx->slab, next);
+                }
+            }
+
+            uint32_t prev_q1 = head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx;
+            uint32_t next_q1 = head->queue_nodes[OM_Q1_PRICE_LADDER].next_idx;
+
+            next->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = prev_q1;
+            next->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = next_q1;
+
+            if (*book_head == head_idx) {
+                *book_head = next_idx;
+            }
+
+            if (prev_q1 != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *prev = om_slot_from_idx(&ctx->slab, prev_q1);
+                if (prev) {
+                    prev->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = next_idx;
+                }
+            }
+
+            if (next_q1 != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *q1_next = om_slot_from_idx(&ctx->slab, next_q1);
+                if (q1_next) {
+                    q1_next->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = next_idx;
+                }
+            }
+
+            head->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q2_TIME_FIFO].next_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+        }
+    } else {
+        /* Remove non-head order from time queue Q2 */
+        om_queue_unlink(&ctx->slab, order, OM_Q2_TIME_FIFO);
+
+        /* Maintain Q2 tail pointer on head */
+        if (next_idx == OM_SLOT_IDX_NULL) {
+            if (prev_q2_idx == head_idx) {
+                head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+            } else {
+                head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = prev_q2_idx;
+            }
+        }
     }
 
     /* Remove from org queue Q3 */
@@ -346,7 +368,7 @@ uint64_t om_orderbook_get_volume_at_price(const OmOrderbookContext *ctx,
 
     /* Sum volume_remain of all orders in Q2 at this price */
     uint64_t total_volume = 0;
-    uint32_t order_idx = level->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
+    uint32_t order_idx = om_slot_get_idx(&ctx->slab, level);
 
     while (order_idx != OM_SLOT_IDX_NULL) {
         OmSlabSlot *order = om_slot_from_idx((OmDualSlab *)&ctx->slab, order_idx);
@@ -521,9 +543,9 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
                         
                         if (slot->volume_remain == 0) {
                             om_orderbook_cancel(ctx, rec.maker_id);
-                        }
-                    }
-                }
+            }
+        }
+    }
                 
                 if (stats) {
                     stats->records_match++;
