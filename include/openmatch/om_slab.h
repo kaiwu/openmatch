@@ -44,6 +44,17 @@
 #define OM_IS_BID(flags)            (((flags) & OM_SIDE_MASK) == OM_SIDE_BID)
 #define OM_IS_ASK(flags)            (((flags) & OM_SIDE_MASK) == OM_SIDE_ASK)
 
+/* Queue assignment within each slot's queue_nodes[4]:
+ * Q0: Internal slab free list (do not use externally)
+ * Q1: Price level queue (linking orders at the same price)
+ * Q2: Time FIFO queue (time priority within a price level)
+ * Q3: Reserved for future use
+ */
+#define OM_Q0_INTERNAL_FREE 0
+#define OM_Q1_PRICE_LEVEL   1
+#define OM_Q2_TIME_FIFO     2
+#define OM_Q3_RESERVED      3
+
 typedef struct OmSlabSlot OmSlabSlot;
 
 typedef struct OmIntrusiveNode {

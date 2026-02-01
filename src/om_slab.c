@@ -63,17 +63,17 @@ int om_slab_init(OmDualSlab *slab, size_t user_data_size) {
         return -1;
     }
 
-    /* Build free list using indices (stored in queue_nodes[0]) */
+    /* Build free list - Q0 is reserved for internal slab use */
     slab->slab_a.free_list_idx = OM_SLOT_IDX_NULL;
     for (size_t i = 0; i < OM_SLAB_A_SIZE; i++) {
         OmSlabSlot *slot = (OmSlabSlot *)(slab->slab_a.memory + i * slot_size);
-        /* Initialize queue nodes to NULL */
+        /* Initialize all queue nodes to NULL */
         for (int q = 0; q < OM_MAX_QUEUES; q++) {
             slot->queue_nodes[q].next_idx = OM_SLOT_IDX_NULL;
             slot->queue_nodes[q].prev_idx = OM_SLOT_IDX_NULL;
         }
-        /* Use queue 0 for free list */
-        slot->queue_nodes[0].next_idx = slab->slab_a.free_list_idx;
+        /* Use Q0 for internal free list */
+        slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx = slab->slab_a.free_list_idx;
         slab->slab_a.free_list_idx = (uint32_t)i;
     }
 
@@ -116,7 +116,7 @@ static OmSlabSlot *slab_a_alloc(OmSlabA *slab_a) {
 
     uint32_t slot_idx = slab_a->free_list_idx;
     OmSlabSlot *slot = idx_to_slot_a(slab_a, slot_idx);
-    slab_a->free_list_idx = slot->queue_nodes[0].next_idx;
+    slab_a->free_list_idx = slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx;
 
     /* Clear mandatory fields and queue nodes */
     slot->price = 0;
@@ -139,12 +139,12 @@ static void slab_a_free(OmSlabA *slab_a, OmSlabSlot *slot) {
     uint32_t slot_idx = slot_to_idx_a(slab_a, slot);
     if (slot_idx == OM_SLOT_IDX_NULL) return;
 
-    /* Clear queue nodes and add to free list (using queue 0) */
+    /* Clear queue nodes and add to free list (Q0 reserved for internal use) */
     for (int q = 0; q < OM_MAX_QUEUES; q++) {
         slot->queue_nodes[q].next_idx = OM_SLOT_IDX_NULL;
         slot->queue_nodes[q].prev_idx = OM_SLOT_IDX_NULL;
     }
-    slot->queue_nodes[0].next_idx = slab_a->free_list_idx;
+    slot->queue_nodes[OM_Q0_INTERNAL_FREE].next_idx = slab_a->free_list_idx;
     slab_a->free_list_idx = slot_idx;
     slab_a->used--;
 }
