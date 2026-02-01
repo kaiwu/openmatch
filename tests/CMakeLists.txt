@@ -3,6 +3,7 @@ find_package(Threads REQUIRED)
 set(TEST_SOURCES
     test_runner.c
     test_slab.c
+    test_orderbook.c
 )
 
 add_executable(test_runner ${TEST_SOURCES})
