@@ -1,4 +1,5 @@
 #include "orderbook.h"
+#include "om_wal.h"
 #include <string.h>
 
 int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config)
@@ -376,4 +377,130 @@ uint32_t om_orderbook_get_price_level_count(const OmOrderbookContext *ctx,
     }
 
     return count;
+}
+
+/* ============================================================================
+ * WAL RECOVERY - Reconstruct orderbook from WAL file
+ * ============================================================================ */
+
+int om_orderbook_recover_from_wal(OmOrderbookContext *ctx, 
+                                   const char *wal_filename,
+                                   OmWalReplayStats *stats)
+{
+    if (!ctx || !wal_filename) {
+        return -1;
+    }
+
+    /* Initialize stats if provided */
+    if (stats) {
+        memset(stats, 0, sizeof(OmWalReplayStats));
+    }
+
+    /* Initialize WAL replay iterator */
+    OmWalReplay replay;
+    if (om_wal_replay_init(&replay, wal_filename) != 0) {
+        return -1;  /* WAL file doesn't exist or can't be opened */
+    }
+
+    /* Replay all records */
+    OmWalType type;
+    void *data;
+    uint64_t sequence;
+    size_t data_len;
+
+    while (om_wal_replay_next(&replay, &type, &data, &sequence, &data_len) == 1) {
+        switch (type) {
+            case OM_WAL_INSERT: {
+                if (data_len != sizeof(OmWalInsert)) {
+                    continue;  /* Corrupted record */
+                }
+                OmWalInsert *rec = (OmWalInsert *)data;
+                
+                /* Allocate slot - will get a new slot_idx */
+                OmSlabSlot *slot = om_slab_alloc(&ctx->slab);
+                if (!slot) {
+                    om_wal_replay_close(&replay);
+                    return -1;  /* Out of memory */
+                }
+                
+                /* Restore order data */
+                slot->order_id = rec->order_id;
+                slot->price = rec->price;
+                slot->volume = rec->volume;
+                slot->volume_remain = rec->vol_remain;
+                slot->org = rec->org;
+                slot->flags = rec->flags;
+                
+                /* Add to orderbook - this adds to price ladder, hashmap, etc. */
+                if (om_orderbook_insert(ctx, rec->product_id, slot) != 0) {
+                    om_slab_free(&ctx->slab, slot);
+                    om_wal_replay_close(&replay);
+                    return -1;
+                }
+                
+                if (stats) {
+                    stats->records_insert++;
+                    stats->last_sequence = sequence;
+                }
+                break;
+            }
+            
+            case OM_WAL_CANCEL: {
+                if (data_len != sizeof(OmWalCancel)) {
+                    continue;
+                }
+                OmWalCancel *rec = (OmWalCancel *)data;
+                
+                /* Cancel the order - this removes from price ladder, hashmap, frees slot */
+                om_orderbook_cancel(ctx, rec->order_id);
+                
+                if (stats) {
+                    stats->records_cancel++;
+                    stats->last_sequence = sequence;
+                }
+                break;
+            }
+            
+            case OM_WAL_MATCH: {
+                if (data_len != sizeof(OmWalMatch)) {
+                    continue;
+                }
+                OmWalMatch *rec = (OmWalMatch *)data;
+                
+                /* Look up maker order */
+                OmOrderEntry *entry = om_hash_get(ctx->order_hashmap, rec->maker_id);
+                if (entry) {
+                    OmSlabSlot *slot = om_slot_from_idx(&ctx->slab, entry->slot_idx);
+                    if (slot && slot->volume_remain >= rec->volume) {
+                        slot->volume_remain -= rec->volume;
+                        
+                        /* If fully filled, remove order */
+                        if (slot->volume_remain == 0) {
+                            om_orderbook_cancel(ctx, rec->maker_id);
+                        }
+                    }
+                }
+                
+                if (stats) {
+                    stats->records_match++;
+                    stats->last_sequence = sequence;
+                }
+                break;
+            }
+            
+            default:
+                if (stats) {
+                    stats->records_other++;
+                    stats->last_sequence = sequence;
+                }
+                break;
+        }
+        
+        if (stats) {
+            stats->bytes_processed += sizeof(OmWalHeader) + data_len;
+        }
+    }
+
+    om_wal_replay_close(&replay);
+    return 0;
 }

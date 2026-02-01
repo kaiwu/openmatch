@@ -1,6 +1,7 @@
 set(OPENMATCH_SOURCES
     om_slab.c
     orderbook.c
+    om_wal.c
 )
 
 add_library(openmatch ${OPENMATCH_SOURCES})
@@ -21,7 +22,7 @@ target_include_directories(openmatch
 set_target_properties(openmatch PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
-    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmatch/om_slab.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_hash.h;${CMAKE_SOURCE_DIR}/include/openmatch/orderbook.h"
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmatch/om_slab.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_hash.h;${CMAKE_SOURCE_DIR}/include/openmatch/orderbook.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_wal.h"
 )
 
 install(TARGETS openmatch
