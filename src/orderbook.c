@@ -250,11 +250,12 @@ bool om_orderbook_cancel(OmOrderbookContext *ctx, uint32_t order_id)
         return false;  /* Price level not found */
     }
 
+    uint32_t order_idx = om_slot_get_idx(&ctx->slab, order);
     uint32_t head_idx = om_slot_get_idx(&ctx->slab, head);
     uint32_t next_idx = order->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
     uint32_t prev_q2_idx = order->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
 
-    if (order == head) {
+    if (order_idx == head_idx) {
         if (next_idx == OM_SLOT_IDX_NULL) {
             /* No more orders at this price - remove price level */
             remove_price_level(ctx, product_id, head, is_bid);
@@ -388,6 +389,102 @@ OmSlabSlot *om_orderbook_get_slot_by_id(OmOrderbookContext *ctx, uint32_t order_
     }
 
     return om_slot_from_idx(&ctx->slab, entry->slot_idx);
+}
+
+OmSlabSlot *om_orderbook_get_best_head(const OmOrderbookContext *ctx,
+                                       uint16_t product_id, bool is_bid)
+{
+    uint32_t head_idx = is_bid ? ctx->products[product_id].bid_head_q1
+                               : ctx->products[product_id].ask_head_q1;
+    if (head_idx == OM_SLOT_IDX_NULL) {
+        return NULL;
+    }
+
+    return om_slot_from_idx((OmDualSlab *)&ctx->slab, head_idx);
+}
+
+bool om_orderbook_remove_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSlabSlot *order)
+{
+    uint64_t price = order->price;
+    bool is_bid = OM_IS_BID(order->flags);
+
+    OmSlabSlot *unused = NULL;
+    OmSlabSlot *head = find_price_level_with_insertion_point(ctx, product_id, price, is_bid, &unused);
+    if (!head) {
+        return false;
+    }
+
+    uint32_t order_idx = om_slot_get_idx(&ctx->slab, order);
+    uint32_t head_idx = om_slot_get_idx(&ctx->slab, head);
+    uint32_t next_idx = order->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
+    uint32_t prev_q2_idx = order->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
+
+    if (order_idx == head_idx) {
+        if (next_idx == OM_SLOT_IDX_NULL) {
+            remove_price_level(ctx, product_id, head, is_bid);
+        } else {
+            OmProductBook *book = &ctx->products[product_id];
+            uint32_t *book_head = is_bid ? &book->bid_head_q1 : &book->ask_head_q1;
+            OmSlabSlot *next = om_slot_from_idx(&ctx->slab, next_idx);
+
+            next->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
+            if (next->queue_nodes[OM_Q2_TIME_FIFO].next_idx == OM_SLOT_IDX_NULL) {
+                next->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+            }
+
+            if (next->queue_nodes[OM_Q2_TIME_FIFO].next_idx != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *after = om_slot_from_idx(&ctx->slab,
+                                                     next->queue_nodes[OM_Q2_TIME_FIFO].next_idx);
+                if (after) {
+                    after->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = om_slot_get_idx(&ctx->slab, next);
+                }
+            }
+
+            uint32_t prev_q1 = head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx;
+            uint32_t next_q1 = head->queue_nodes[OM_Q1_PRICE_LADDER].next_idx;
+
+            next->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = prev_q1;
+            next->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = next_q1;
+
+            if (*book_head == head_idx) {
+                *book_head = next_idx;
+            }
+
+            if (prev_q1 != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *prev = om_slot_from_idx(&ctx->slab, prev_q1);
+                if (prev) {
+                    prev->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = next_idx;
+                }
+            }
+
+            if (next_q1 != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *q1_next = om_slot_from_idx(&ctx->slab, next_q1);
+                if (q1_next) {
+                    q1_next->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = next_idx;
+                }
+            }
+
+            head->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q2_TIME_FIFO].next_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+        }
+    } else {
+        om_queue_unlink(&ctx->slab, order, OM_Q2_TIME_FIFO);
+        if (next_idx == OM_SLOT_IDX_NULL) {
+            if (prev_q2_idx == head_idx) {
+                head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+            } else {
+                head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = prev_q2_idx;
+            }
+        }
+    }
+
+    om_queue_unlink(&ctx->slab, order, OM_Q3_ORG_QUEUE);
+    om_hash_remove(ctx->order_hashmap, order->order_id);
+    om_slab_free(&ctx->slab, order);
+
+    return true;
 }
 
 bool om_orderbook_price_level_exists(const OmOrderbookContext *ctx,

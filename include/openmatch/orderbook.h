@@ -136,4 +136,25 @@ bool om_orderbook_price_level_exists(const OmOrderbookContext *ctx,
 uint32_t om_orderbook_get_price_level_count(const OmOrderbookContext *ctx,
                                              uint16_t product_id, bool is_bid);
 
+/**
+ * Remove an order slot from the orderbook without using order_id lookup
+ *
+ * @param ctx Orderbook context
+ * @param product_id Product ID
+ * @param order Order slot to remove
+ * @return true if removed, false if not found
+ */
+bool om_orderbook_remove_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSlabSlot *order);
+
+/**
+ * Get best price level head slot for product side
+ *
+ * @param ctx Orderbook context
+ * @param product_id Product ID
+ * @param is_bid true for bid side, false for ask side
+ * @return Head order slot or NULL if empty
+ */
+OmSlabSlot *om_orderbook_get_best_head(const OmOrderbookContext *ctx,
+                                       uint16_t product_id, bool is_bid);
+
 #endif

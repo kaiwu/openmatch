@@ -4,12 +4,14 @@
 Suite* slab_suite(void);
 Suite* orderbook_suite(void);
 Suite* wal_suite(void);
+Suite* engine_suite(void);
 
 int main(void) {
     int number_failed;
     SRunner *sr = srunner_create(slab_suite());
     srunner_add_suite(sr, orderbook_suite());
     srunner_add_suite(sr, wal_suite());
+    srunner_add_suite(sr, engine_suite());
     
     srunner_run_all(sr, CK_NORMAL);
     number_failed = srunner_ntests_failed(sr);

@@ -3,6 +3,7 @@ set(OPENMATCH_SOURCES
     orderbook.c
     om_wal.c
     om_perf.c
+    om_engine.c
 )
 
 add_library(openmatch_shared SHARED ${OPENMATCH_SOURCES})
@@ -36,12 +37,12 @@ set_target_properties(openmatch_shared PROPERTIES
     OUTPUT_NAME openmatch
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
-    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmatch/om_slab.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_hash.h;${CMAKE_SOURCE_DIR}/include/openmatch/orderbook.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_wal.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_perf.h"
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmatch/om_slab.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_hash.h;${CMAKE_SOURCE_DIR}/include/openmatch/orderbook.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_wal.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_perf.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_engine.h"
 )
 
 set_target_properties(openmatch_static PROPERTIES
     OUTPUT_NAME openmatch
-    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmatch/om_slab.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_hash.h;${CMAKE_SOURCE_DIR}/include/openmatch/orderbook.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_wal.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_perf.h"
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmatch/om_slab.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_hash.h;${CMAKE_SOURCE_DIR}/include/openmatch/orderbook.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_wal.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_perf.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_engine.h"
 )
 
 install(TARGETS openmatch_shared openmatch_static
