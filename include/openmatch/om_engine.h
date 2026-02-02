@@ -128,6 +128,8 @@ typedef struct OmEngineCallbacks {
 typedef struct OmEngineConfig {
     OmSlabConfig slab;          /**< Slab allocator configuration (required) */
     OmWalConfig *wal;           /**< Optional WAL configuration (NULL to disable) */
+    uint32_t max_products;       /**< Number of products to allocate */
+    uint32_t max_org;            /**< Number of orgs to allocate per product */
     OmEngineCallbacks callbacks; /**< Callback configuration */
 } OmEngineConfig;
 
@@ -289,5 +291,24 @@ bool om_engine_deactivate(OmEngine *engine, uint32_t order_id);
  * @return true if activated, false if not found or not deactivated
  */
 bool om_engine_activate(OmEngine *engine, uint32_t order_id);
+
+/**
+ * Cancel all orders for an org within a product
+ *
+ * @param engine Engine context
+ * @param product_id Product ID
+ * @param org_id Organization ID
+ * @return Number of orders cancelled
+ */
+uint32_t om_engine_cancel_org_product(OmEngine *engine, uint16_t product_id, uint16_t org_id);
+
+/**
+ * Cancel all orders for an org across all products
+ *
+ * @param engine Engine context
+ * @param org_id Organization ID
+ * @return Number of orders cancelled
+ */
+uint32_t om_engine_cancel_org_all(OmEngine *engine, uint16_t org_id);
 
 #endif /* OM_ENGINE_H */

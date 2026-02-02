@@ -91,6 +91,8 @@ static void init_engine_with_ctx(OmEngine *engine, TestMatchCtx *ctx)
             .total_slots = 1000
         },
         .wal = NULL,
+        .max_products = 10,
+        .max_org = 100,
         .callbacks = {
             .can_match = test_can_match,
             .on_match = test_on_match,
@@ -483,6 +485,86 @@ START_TEST(test_engine_deactivate_activate)
 }
 END_TEST
 
+START_TEST(test_engine_cancel_org_product)
+{
+    OmEngine engine;
+    TestMatchCtx ctx = {0};
+    ctx.pre_booked_allow = true;
+    init_engine_with_ctx(&engine, &ctx);
+
+    OmSlabSlot *o1 = om_slab_alloc(&engine.orderbook.slab);
+    OmSlabSlot *o2 = om_slab_alloc(&engine.orderbook.slab);
+    OmSlabSlot *o3 = om_slab_alloc(&engine.orderbook.slab);
+
+    om_slot_set_order_id(o1, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(o1, 10000);
+    om_slot_set_volume(o1, 10);
+    om_slot_set_volume_remain(o1, 10);
+    om_slot_set_flags(o1, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(o1, 1);
+
+    om_slot_set_order_id(o2, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(o2, 10000);
+    om_slot_set_volume(o2, 10);
+    om_slot_set_volume_remain(o2, 10);
+    om_slot_set_flags(o2, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(o2, 1);
+
+    om_slot_set_order_id(o3, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(o3, 10000);
+    om_slot_set_volume(o3, 10);
+    om_slot_set_volume_remain(o3, 10);
+    om_slot_set_flags(o3, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(o3, 2);
+
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, o1), 0);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, o2), 0);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, o3), 0);
+
+    ck_assert_uint_eq(om_engine_cancel_org_product(&engine, 0, 1), 2);
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, o1->order_id));
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, o2->order_id));
+    ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&engine.orderbook, o3->order_id));
+
+    om_engine_destroy(&engine);
+}
+END_TEST
+
+START_TEST(test_engine_cancel_org_all)
+{
+    OmEngine engine;
+    TestMatchCtx ctx = {0};
+    ctx.pre_booked_allow = true;
+    init_engine_with_ctx(&engine, &ctx);
+
+    OmSlabSlot *o1 = om_slab_alloc(&engine.orderbook.slab);
+    OmSlabSlot *o2 = om_slab_alloc(&engine.orderbook.slab);
+
+    om_slot_set_order_id(o1, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(o1, 10000);
+    om_slot_set_volume(o1, 10);
+    om_slot_set_volume_remain(o1, 10);
+    om_slot_set_flags(o1, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(o1, 3);
+
+    om_slot_set_order_id(o2, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(o2, 10100);
+    om_slot_set_volume(o2, 10);
+    om_slot_set_volume_remain(o2, 10);
+    om_slot_set_flags(o2, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    om_slot_set_org(o2, 3);
+
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, o1), 0);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 1, o2), 0);
+
+    ck_assert_uint_eq(om_engine_cancel_org_all(&engine, 3), 2);
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, o1->order_id));
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, o2->order_id));
+
+    om_engine_destroy(&engine);
+}
+END_TEST
+
 Suite *engine_suite(void)
 {
     Suite *s = suite_create("Engine");
@@ -505,6 +587,8 @@ Suite *engine_suite(void)
     tcase_add_test(tc_core, test_engine_match_multi_product_isolated);
     tcase_add_test(tc_core, test_engine_match_bid_vs_bid_no_cross);
     tcase_add_test(tc_core, test_engine_deactivate_activate);
+    tcase_add_test(tc_core, test_engine_cancel_org_product);
+    tcase_add_test(tc_core, test_engine_cancel_org_all);
 
     suite_add_tcase(s, tc_core);
     return s;

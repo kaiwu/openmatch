@@ -29,7 +29,12 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
         wal_ptr = engine->wal;
     }
 
-    int ob_ret = om_orderbook_init(&engine->orderbook, &config->slab, wal_ptr);
+    if (config->max_products == 0 || config->max_org == 0) {
+        return -1;
+    }
+
+    int ob_ret = om_orderbook_init(&engine->orderbook, &config->slab, wal_ptr,
+                                   config->max_products, config->max_org);
     if (ob_ret != 0) {
         if (engine->wal_owned && engine->wal) {
             om_wal_close(engine->wal);
@@ -283,4 +288,20 @@ bool om_engine_activate(OmEngine *engine, uint32_t order_id)
     }
 
     return om_engine_match(engine, entry->product_id, order) == 0;
+}
+
+uint32_t om_engine_cancel_org_product(OmEngine *engine, uint16_t product_id, uint16_t org_id)
+{
+    if (!engine) {
+        return 0;
+    }
+    return om_orderbook_cancel_org_product(&engine->orderbook, product_id, org_id);
+}
+
+uint32_t om_engine_cancel_org_all(OmEngine *engine, uint16_t org_id)
+{
+    if (!engine) {
+        return 0;
+    }
+    return om_orderbook_cancel_org_all(&engine->orderbook, org_id);
 }

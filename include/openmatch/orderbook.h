@@ -15,7 +15,10 @@ struct OmWal;
  */
 typedef struct OmOrderbookContext {
     OmDualSlab slab;                    /**< Dual slab allocator for all orders */
-    OmProductBook products[OM_MAX_PRODUCTS]; /**< Array of product orderbooks */
+    OmProductBook *products;             /**< Array of product orderbooks */
+    uint32_t max_products;               /**< Number of products allocated */
+    uint32_t max_org;                    /**< Number of orgs allocated per product */
+    uint32_t *org_heads;                 /**< Per-product org head indices (size=max_products*max_org) */
     OmHashMap *order_hashmap;           /**< Hashmap: order_id -> OmOrderEntry */
     uint32_t next_slot_idx;             /**< Next slot index hint for Q0 */
     struct OmWal *wal;                  /**< Optional WAL for durability (NULL if disabled) */
@@ -28,7 +31,8 @@ typedef struct OmOrderbookContext {
  * @param wal Optional WAL pointer for durability (NULL if not enabled)
  * @return 0 on success, negative on error
  */
-int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal);
+int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal,
+                      uint32_t max_products, uint32_t max_org);
 
 /**
  * Destroy orderbook context and free all resources
@@ -156,6 +160,25 @@ bool om_orderbook_remove_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSl
  * @return true if removed, false if not found
  */
 bool om_orderbook_unlink_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSlabSlot *order);
+
+/**
+ * Cancel all orders for an org within a product
+ *
+ * @param ctx Orderbook context
+ * @param product_id Product ID
+ * @param org_id Organization ID
+ * @return Number of orders cancelled
+ */
+uint32_t om_orderbook_cancel_org_product(OmOrderbookContext *ctx, uint16_t product_id, uint16_t org_id);
+
+/**
+ * Cancel all orders for an org across all products
+ *
+ * @param ctx Orderbook context
+ * @param org_id Organization ID
+ * @return Number of orders cancelled
+ */
+uint32_t om_orderbook_cancel_org_all(OmOrderbookContext *ctx, uint16_t org_id);
 
 /**
  * Get best price level head slot for product side

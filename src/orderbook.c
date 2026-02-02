@@ -2,15 +2,48 @@
 #include "om_wal.h"
 #include <string.h>
 
-int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal)
+int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal,
+                      uint32_t max_products, uint32_t max_org)
 {
+    if (!ctx || !config) {
+        return -1;
+    }
+
+    if (max_products == 0 || max_org == 0) {
+        return -1;
+    }
+
+    memset(ctx, 0, sizeof(OmOrderbookContext));
+    ctx->max_products = max_products;
+    ctx->max_org = max_org;
+
+    ctx->products = calloc(max_products, sizeof(OmProductBook));
+    if (!ctx->products) {
+        return -1;
+    }
+
+    ctx->org_heads = calloc((size_t)max_products * (size_t)max_org, sizeof(uint32_t));
+    if (!ctx->org_heads) {
+        free(ctx->products);
+        ctx->products = NULL;
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < max_products * max_org; i++) {
+        ctx->org_heads[i] = OM_SLOT_IDX_NULL;
+    }
+
     int ret = om_slab_init(&ctx->slab, config);
     if (ret != 0) {
+        free(ctx->org_heads);
+        free(ctx->products);
+        ctx->org_heads = NULL;
+        ctx->products = NULL;
         return ret;
     }
 
     /* Initialize all product books to empty state */
-    for (int i = 0; i < OM_MAX_PRODUCTS; i++) {
+    for (uint32_t i = 0; i < max_products; i++) {
         ctx->products[i].bid_head_q1 = OM_SLOT_IDX_NULL;
         ctx->products[i].ask_head_q1 = OM_SLOT_IDX_NULL;
     }
@@ -19,6 +52,10 @@ int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struc
     ctx->order_hashmap = om_hash_create(config->total_slots);
     if (!ctx->order_hashmap) {
         om_slab_destroy(&ctx->slab);
+        free(ctx->org_heads);
+        free(ctx->products);
+        ctx->org_heads = NULL;
+        ctx->products = NULL;
         return -1;
     }
 
@@ -43,6 +80,10 @@ void om_orderbook_destroy(OmOrderbookContext *ctx)
         ctx->order_hashmap = NULL;
     }
     om_slab_destroy(&ctx->slab);
+    free(ctx->org_heads);
+    free(ctx->products);
+    ctx->org_heads = NULL;
+    ctx->products = NULL;
 }
 
 /**
@@ -202,10 +243,20 @@ int om_orderbook_insert(OmOrderbookContext *ctx, uint16_t product_id,
         append_to_time_queue(ctx, head, order);
     }
 
-    /* Add order to org queue (Q3) - for now, just link as simple list
-     * In production, this would maintain per-org heads
-     */
-    /* TODO: Implement proper org queue linking when org tracking is added */
+    /* Add order to org queue (Q3) per product */
+    if (product_id < ctx->max_products && order->org < ctx->max_org) {
+        uint32_t org_idx = product_id * ctx->max_org + order->org;
+        uint32_t *head_idx = &ctx->org_heads[org_idx];
+        if (*head_idx == OM_SLOT_IDX_NULL) {
+            *head_idx = om_slot_get_idx(&ctx->slab, order);
+            order->queue_nodes[OM_Q3_ORG_QUEUE].prev_idx = OM_SLOT_IDX_NULL;
+            order->queue_nodes[OM_Q3_ORG_QUEUE].next_idx = OM_SLOT_IDX_NULL;
+        } else {
+            OmSlabSlot *head = om_slot_from_idx(&ctx->slab, *head_idx);
+            om_queue_link_before(&ctx->slab, head, order, OM_Q3_ORG_QUEUE);
+            *head_idx = om_slot_get_idx(&ctx->slab, order);
+        }
+    }
 
     /* Add order to hashmap for O(1) lookup by order_id */
     uint32_t slot_idx = om_slot_get_idx(&ctx->slab, order);
@@ -323,6 +374,13 @@ bool om_orderbook_cancel(OmOrderbookContext *ctx, uint32_t order_id)
     }
 
     /* Remove from org queue Q3 */
+    if (product_id < ctx->max_products && order->org < ctx->max_org) {
+        uint32_t org_idx = product_id * ctx->max_org + order->org;
+        uint32_t *head_idx = &ctx->org_heads[org_idx];
+        if (*head_idx == slot_idx) {
+            *head_idx = order->queue_nodes[OM_Q3_ORG_QUEUE].next_idx;
+        }
+    }
     om_queue_unlink(&ctx->slab, order, OM_Q3_ORG_QUEUE);
 
     /* Remove from hashmap */
@@ -561,8 +619,55 @@ bool om_orderbook_unlink_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSl
         }
     }
 
+    if (product_id < ctx->max_products && order->org < ctx->max_org) {
+        uint32_t org_idx = product_id * ctx->max_org + order->org;
+        uint32_t *head_idx = &ctx->org_heads[org_idx];
+        uint32_t slot_idx = om_slot_get_idx(&ctx->slab, order);
+        if (*head_idx == slot_idx) {
+            *head_idx = order->queue_nodes[OM_Q3_ORG_QUEUE].next_idx;
+        }
+    }
     om_queue_unlink(&ctx->slab, order, OM_Q3_ORG_QUEUE);
     return true;
+}
+
+uint32_t om_orderbook_cancel_org_product(OmOrderbookContext *ctx, uint16_t product_id, uint16_t org_id)
+{
+    if (!ctx || product_id >= ctx->max_products || org_id >= ctx->max_org) {
+        return 0;
+    }
+
+    uint32_t org_idx = product_id * ctx->max_org + org_id;
+    uint32_t head_idx = ctx->org_heads[org_idx];
+    uint32_t cancelled = 0;
+
+    while (head_idx != OM_SLOT_IDX_NULL) {
+        OmSlabSlot *order = om_slot_from_idx(&ctx->slab, head_idx);
+        if (!order) {
+            break;
+        }
+        uint32_t next_idx = order->queue_nodes[OM_Q3_ORG_QUEUE].next_idx;
+        if (om_orderbook_cancel(ctx, order->order_id)) {
+            cancelled++;
+        }
+        head_idx = next_idx;
+    }
+
+    return cancelled;
+}
+
+uint32_t om_orderbook_cancel_org_all(OmOrderbookContext *ctx, uint16_t org_id)
+{
+    if (!ctx || org_id >= ctx->max_org) {
+        return 0;
+    }
+
+    uint32_t cancelled = 0;
+    for (uint32_t product_id = 0; product_id < ctx->max_products; product_id++) {
+        cancelled += om_orderbook_cancel_org_product(ctx, (uint16_t)product_id, org_id);
+    }
+
+    return cancelled;
 }
 
 bool om_orderbook_price_level_exists(const OmOrderbookContext *ctx,
