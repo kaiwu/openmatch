@@ -125,6 +125,14 @@ Presets include `OM_PERF_DEFAULT`, `OM_PERF_HFT`, `OM_PERF_DURABLE`,
 `OM_PERF_RECOVERY`, `OM_PERF_MINIMAL`. Use `om_perf_validate()` and
 `om_perf_autotune()` to verify/tune.
 
+**Approximate throughput (single‑thread, light callbacks, in‑memory):**
+
+1. **OM_PERF_HFT**: ~2–6M matches/sec/core
+2. **OM_PERF_RECOVERY**: ~1.5–4M matches/sec/core
+3. **OM_PERF_DEFAULT**: ~1–3M matches/sec/core
+4. **OM_PERF_MINIMAL**: ~0.5–1.5M matches/sec/core
+5. **OM_PERF_DURABLE**: ~0.2–0.8M matches/sec/core
+
 Engine can apply a preset via `OmEngineConfig.perf` or `om_engine_init_perf()`.
 
 ## Example (Minimal)
@@ -168,13 +176,13 @@ om_wal_close(&wal);
 
 ## Roadmap / Missing Parts
 
-1. **Order types** (market/IOC/FOK logic beyond limit‑only matching).
-2. **Snapshotting** (state dump + WAL checkpointing).
-3. **Async I/O** in WAL (flag exists, not implemented).
-4. **Multi‑threading** (lock-free or sharded per-product orderbooks).
-5. **Config wiring** from `om_perf` into live components.
-6. **Risk/limits hooks** (self-trade prevention, credit limits, throttling).
-7. **More validation** (parameter checks, error codes, and recovery guarantees).
+1. **Snapshotting** (state dump + WAL checkpointing).
+2. **Async I/O** in WAL (flag exists, not implemented).
+3. **More validation** (parameter checks, error codes, and recovery guarantees):
+   - bounds checks for product/org ids
+   - enforce volume/price invariants (non‑zero, monotonic rules)
+   - sanity checks on callbacks (e.g., can_match > 0 implies matchable)
+   - WAL replay strictness options (drop/stop on corrupt record)
 
 ## Tools
 
