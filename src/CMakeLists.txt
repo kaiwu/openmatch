@@ -1,13 +1,20 @@
 set(OPENMATCH_SOURCES
     om_slab.c
     orderbook.c
-    om_wal.c
     om_perf.c
     om_engine.c
 )
 
-add_library(openmatch_shared SHARED ${OPENMATCH_SOURCES})
-add_library(openmatch_static STATIC ${OPENMATCH_SOURCES})
+option(OM_USE_WAL_MOCK "Use WAL mock implementation" OFF)
+
+set(OPENMATCH_WAL_SOURCES om_wal.c)
+if(OM_USE_WAL_MOCK)
+    set(OPENMATCH_WAL_SOURCES om_wal_mock.c)
+    add_compile_definitions(OM_USE_WAL_MOCK)
+endif()
+
+add_library(openmatch_shared SHARED ${OPENMATCH_SOURCES} ${OPENMATCH_WAL_SOURCES})
+add_library(openmatch_static STATIC ${OPENMATCH_SOURCES} ${OPENMATCH_WAL_SOURCES})
 
 add_library(openmatch ALIAS openmatch_shared)
 

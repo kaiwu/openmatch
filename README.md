@@ -249,6 +249,17 @@ List all activates/deactivates:
   | awk -F'[][]' '{for (i=2;i<=NF;i+=2) if ($i=="type" && ($(i+1)=="DEACTIVATE" || $(i+1)=="ACTIVATE")) print $0}'
 ```
 
-## License
+### wal_mock (compile-time)
 
-MIT
+Build the library with WAL mock (prints to stderr, no file I/O):
+
+```
+cmake -S . -B build -DOM_USE_WAL_MOCK=ON
+cmake --build build
+```
+
+Mock output uses the same bracketed format as `wal_reader`, for example:
+
+```
+seq[12] type[MATCH] m[100] t[200] p[10000] q[5] pid[0] ts[1700000000]
+```

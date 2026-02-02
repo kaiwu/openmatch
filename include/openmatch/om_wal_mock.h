@@ -20,6 +20,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 
 #include "om_slab.h"
 
@@ -32,6 +36,8 @@ typedef enum OmWalType {
     OM_WAL_CANCEL = 2,
     OM_WAL_MATCH = 3,
     OM_WAL_CHECKPOINT = 4,
+    OM_WAL_DEACTIVATE = 5,
+    OM_WAL_ACTIVATE = 6,
 } OmWalType;
 
 typedef struct OmWalHeader {
@@ -43,11 +49,12 @@ typedef struct OmWalInsert {
     uint64_t price;
     uint64_t volume;
     uint64_t vol_remain;
-    uint32_t slot_idx;
-    uint16_t product_id;
     uint16_t org;
     uint16_t flags;
-    uint16_t reserved[3];
+    uint16_t product_id;
+    uint16_t reserved;
+    uint32_t user_data_size;
+    uint32_t aux_data_size;
     uint64_t timestamp_ns;
 } OmWalInsert;
 
@@ -69,6 +76,22 @@ typedef struct OmWalMatch {
     uint16_t reserved[3];
 } OmWalMatch;
 
+typedef struct OmWalDeactivate {
+    uint64_t order_id;
+    uint64_t timestamp_ns;
+    uint32_t slot_idx;
+    uint16_t product_id;
+    uint16_t reserved;
+} OmWalDeactivate;
+
+typedef struct OmWalActivate {
+    uint64_t order_id;
+    uint64_t timestamp_ns;
+    uint32_t slot_idx;
+    uint16_t product_id;
+    uint16_t reserved;
+} OmWalActivate;
+
 typedef struct OmWalConfig {
     const char *filename;       /* Ignored in mock */
     size_t buffer_size;         /* Ignored in mock */
@@ -85,9 +108,13 @@ typedef struct OmWal {
     uint64_t inserts_logged;
     uint64_t cancels_logged;
     uint64_t matches_logged;
+    uint64_t deactivates_logged;
+    uint64_t activates_logged;
     bool enabled;               /* Can disable output */
     bool show_timestamp;        /* Show timestamps */
     bool show_aux_data;         /* Show hex dump of aux data */
+    size_t user_data_size;
+    size_t aux_data_size;
 } OmWal;
 
 typedef struct OmWalReplay {
@@ -130,6 +157,12 @@ uint64_t om_wal_mock_cancel(OmWal *wal, uint32_t order_id, uint32_t slot_idx, ui
 
 /* Log match - prints MATCH operation to stderr */
 uint64_t om_wal_mock_match(OmWal *wal, const OmWalMatch *rec);
+
+/* Log deactivate - prints DEACTIVATE operation to stderr */
+uint64_t om_wal_mock_deactivate(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id);
+
+/* Log activate - prints ACTIVATE operation to stderr */
+uint64_t om_wal_mock_activate(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id);
 
 /* Flush - prints FLUSH message */
 int om_wal_mock_flush(OmWal *wal);
@@ -176,6 +209,8 @@ int om_wal_mock_recover_from_wal(struct OmOrderbookContext *ctx,
 #define om_wal_insert       om_wal_mock_insert
 #define om_wal_cancel       om_wal_mock_cancel
 #define om_wal_match        om_wal_mock_match
+#define om_wal_deactivate   om_wal_mock_deactivate
+#define om_wal_activate     om_wal_mock_activate
 #define om_wal_flush        om_wal_mock_flush
 #define om_wal_fsync        om_wal_mock_fsync
 #define om_wal_sequence     om_wal_mock_sequence
@@ -211,5 +246,6 @@ static inline void om_wal_mock_set_show_aux_data(OmWal *wal, bool show) {
 
 /* Print formatted WAL stats */
 void om_wal_mock_print_stats(const OmWal *wal);
+
 
 #endif
