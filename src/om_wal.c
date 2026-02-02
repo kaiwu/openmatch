@@ -136,7 +136,7 @@ static uint64_t wal_scan_for_last_sequence(const char *filename, const OmWalConf
         uint8_t type = om_wal_header_type(packed);
         uint16_t payload_len = om_wal_header_len(packed);
 
-        if (type < OM_WAL_INSERT || type > OM_WAL_CHECKPOINT) {
+        if (type < OM_WAL_INSERT || type > OM_WAL_ACTIVATE) {
             break;
         }
 
@@ -589,7 +589,7 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
     uint16_t payload_len = om_wal_header_len(packed);
     
     /* Treat invalid type as EOF (handles zero padding at file end) */
-    if (type_byte < OM_WAL_INSERT || type_byte > OM_WAL_CHECKPOINT) {
+    if (type_byte < OM_WAL_INSERT || type_byte > OM_WAL_ACTIVATE) {
         return 0;  /* EOF - not a valid record */
     }
     *type = (OmWalType)type_byte;

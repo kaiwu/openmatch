@@ -45,6 +45,7 @@ include_directories(${CMAKE_SOURCE_DIR}/deps/klib)
 
 add_subdirectory(deps/check)
 add_subdirectory(src)
+add_subdirectory(tools)
 
 enable_testing()
 add_subdirectory(tests)
