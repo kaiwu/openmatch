@@ -135,6 +135,21 @@ Presets include `OM_PERF_DEFAULT`, `OM_PERF_HFT`, `OM_PERF_DURABLE`,
 
 Engine can apply a preset via `OmEngineConfig.perf` or `om_engine_init_perf()`.
 
+### Engine (`om_engine`)
+
+Callback-driven matching core. Supports:
+
+- `can_match` (per maker/taker; returns max match volume)
+- `on_match` (per order, post‑deduction)
+- `on_deal` (per trade)
+- `on_booked` / `on_filled` / `on_cancel`
+- `pre_booked` (decide whether remainder rests)
+
+Order deactivation/activation:
+
+- `om_engine_deactivate(order_id)` (remove from book, keep slot)
+- `om_engine_activate(order_id)` (reattempt match as taker)
+
 ## Example (Minimal)
 
 ```c
@@ -237,17 +252,3 @@ List all activates/deactivates:
 ## License
 
 MIT
-### Engine (`om_engine`)
-
-Callback-driven matching core. Supports:
-
-- `can_match` (per maker/taker; returns max match volume)
-- `on_match` (per order, post‑deduction)
-- `on_deal` (per trade)
-- `on_booked` / `on_filled` / `on_cancel`
-- `pre_booked` (decide whether remainder rests)
-
-Order deactivation/activation:
-
-- `om_engine_deactivate(order_id)` (remove from book, keep slot)
-- `om_engine_activate(order_id)` (reattempt match as taker)
