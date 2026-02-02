@@ -185,3 +185,18 @@ void om_wal_mock_print_stats(const OmWal *wal) {
             wal->inserts_logged, wal->cancels_logged, wal->matches_logged,
             wal->deactivates_logged, wal->activates_logged);
 }
+
+uint64_t om_wal_mock_append_custom(OmWal *wal, OmWalType type, const void *data, size_t len) {
+    if (!wal || !data) {
+        return 0;
+    }
+    if (type < (OmWalType)OM_WAL_USER_BASE) {
+        return 0;
+    }
+    wal->sequence++;
+    if (wal->enabled) {
+        fprintf(stderr, "seq[%" PRIu64 "] type[USER] ut[%u] len[%zu]\n",
+                wal->sequence, (unsigned)type, len);
+    }
+    return wal->sequence;
+}

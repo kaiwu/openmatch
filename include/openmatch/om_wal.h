@@ -22,6 +22,7 @@ typedef enum OmWalType {
     OM_WAL_CHECKPOINT = 4,  /* 32 bytes */
     OM_WAL_DEACTIVATE = 5,  /* 32 bytes */
     OM_WAL_ACTIVATE = 6,    /* 32 bytes */
+    OM_WAL_USER_BASE = 0x80 /* User-defined record base */
 } OmWalType;
 
 /* Compact record header - 8 bytes */
@@ -213,6 +214,9 @@ typedef struct OmWalReplay {
     size_t user_data_size;
     size_t aux_data_size;
     bool enable_crc32;          /* Whether to validate CRC32 on replay */
+
+    void *user_ctx;             /* User-defined context for custom records */
+    int (*user_handler)(OmWalType type, const void *data, size_t len, void *user_ctx);
 } OmWalReplay;
 
 /* Initialize replay iterator for reading WAL file */
@@ -226,6 +230,11 @@ int om_wal_replay_init_with_sizes(OmWalReplay *replay, const char *filename,
 int om_wal_replay_init_with_config(OmWalReplay *replay, const char *filename,
                                     const OmWalConfig *config);
 
+/* Register user record handler for replay (type >= OM_WAL_USER_BASE) */
+void om_wal_replay_set_user_handler(OmWalReplay *replay,
+                                    int (*handler)(OmWalType type, const void *data, size_t len, void *user_ctx),
+                                    void *user_ctx);
+
 /* Close replay iterator */
 void om_wal_replay_close(OmWalReplay *replay);
 
@@ -234,6 +243,9 @@ void om_wal_replay_close(OmWalReplay *replay);
 /* For INSERT records, data_len includes both header + user_data + aux_data */
 int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data, 
                        uint64_t *sequence, size_t *data_len);
+
+/* Append a custom WAL record (type >= OM_WAL_USER_BASE) */
+uint64_t om_wal_append_custom(OmWal *wal, OmWalType type, const void *data, size_t len);
 
 /* Get statistics about replay progress */
 typedef struct OmWalReplayStats {

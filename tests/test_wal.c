@@ -523,6 +523,62 @@ START_TEST(test_wal_deactivate_activate_recovery)
 }
 END_TEST
 
+static int test_user_handler(OmWalType type, const void *data, size_t len, void *user_ctx)
+{
+    (void)data;
+    (void)len;
+    uint32_t *count = (uint32_t *)user_ctx;
+    if (type == (OmWalType)OM_WAL_USER_BASE) {
+        (*count)++;
+    }
+    return 0;
+}
+
+START_TEST(test_wal_custom_record_replay)
+{
+    cleanup_wal_file();
+
+    OmWalConfig wal_config = {
+        .filename = TEST_WAL_FILE,
+        .buffer_size = 64 * 1024,
+        .sync_interval_ms = 0,
+        .use_direct_io = false,
+        .enable_crc32 = false,
+        .user_data_size = 0,
+        .aux_data_size = 0
+    };
+
+    OmWal wal;
+    ck_assert_int_eq(om_wal_init(&wal, &wal_config), 0);
+
+    uint32_t payload = 1234;
+    ck_assert_uint_ne(om_wal_append_custom(&wal, (OmWalType)OM_WAL_USER_BASE, &payload, sizeof(payload)), 0);
+
+    ck_assert_int_eq(om_wal_flush(&wal), 0);
+    om_wal_close(&wal);
+
+    OmWalReplay replay;
+    ck_assert_int_eq(om_wal_replay_init_with_config(&replay, TEST_WAL_FILE, &wal_config), 0);
+
+    uint32_t count = 0;
+    om_wal_replay_set_user_handler(&replay, test_user_handler, &count);
+
+    OmWalType type;
+    void *data;
+    uint64_t sequence;
+    size_t data_len;
+
+    while (om_wal_replay_next(&replay, &type, &data, &sequence, &data_len) == 1) {
+        /* no-op */
+    }
+
+    ck_assert_uint_eq(count, 1);
+
+    om_wal_replay_close(&replay);
+    cleanup_wal_file();
+}
+END_TEST
+
 START_TEST(test_wal_aux_data_persistence)
 {
     cleanup_wal_file();
@@ -687,6 +743,7 @@ Suite *wal_suite(void)
     tcase_add_test(tc_core, test_wal_match_replay);
     tcase_add_test(tc_core, test_wal_match_recovery_from_engine);
     tcase_add_test(tc_core, test_wal_deactivate_activate_recovery);
+    tcase_add_test(tc_core, test_wal_custom_record_replay);
 
     suite_add_tcase(s, tc_core);
     return s;

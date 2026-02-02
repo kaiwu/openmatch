@@ -38,6 +38,7 @@ typedef enum OmWalType {
     OM_WAL_CHECKPOINT = 4,
     OM_WAL_DEACTIVATE = 5,
     OM_WAL_ACTIVATE = 6,
+    OM_WAL_USER_BASE = 0x80
 } OmWalType;
 
 typedef struct OmWalHeader {
@@ -211,6 +212,7 @@ int om_wal_mock_recover_from_wal(struct OmOrderbookContext *ctx,
 #define om_wal_match        om_wal_mock_match
 #define om_wal_deactivate   om_wal_mock_deactivate
 #define om_wal_activate     om_wal_mock_activate
+#define om_wal_append_custom om_wal_mock_append_custom
 #define om_wal_flush        om_wal_mock_flush
 #define om_wal_fsync        om_wal_mock_fsync
 #define om_wal_sequence     om_wal_mock_sequence
@@ -246,6 +248,8 @@ static inline void om_wal_mock_set_show_aux_data(OmWal *wal, bool show) {
 
 /* Print formatted WAL stats */
 void om_wal_mock_print_stats(const OmWal *wal);
+
+uint64_t om_wal_mock_append_custom(OmWal *wal, OmWalType type, const void *data, size_t len);
 
 
 #endif

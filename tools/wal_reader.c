@@ -100,6 +100,9 @@ int main(int argc, char **argv) {
                 }
                 break;
             default:
+                if (type >= OM_WAL_USER_BASE) {
+                    printf("user[%zu]", data_len);
+                }
                 break;
         }
         printf("\n");

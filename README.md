@@ -119,6 +119,16 @@ Replay API:
 - `om_wal_replay_next()` returns `-2` on CRC mismatch
 - `om_orderbook_recover_from_wal()` reconstructs slab + orderbook
 
+Custom records:
+
+- use `om_wal_append_custom()` with types `>= OM_WAL_USER_BASE`
+- register a replay handler with `om_wal_replay_set_user_handler()`
+
+Custom record output:
+
+- `wal_reader` prints `user[len]` for custom records
+- `wal_mock` prints `type[USER] ut[<type>] len[<len>]`
+
 ### Performance Presets (`om_perf`)
 
 Presets include `OM_PERF_DEFAULT`, `OM_PERF_HFT`, `OM_PERF_DURABLE`,

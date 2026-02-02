@@ -505,6 +505,16 @@ int om_wal_replay_init_with_config(OmWalReplay *replay, const char *filename,
     return ret;
 }
 
+void om_wal_replay_set_user_handler(OmWalReplay *replay,
+                                    int (*handler)(OmWalType type, const void *data, size_t len, void *user_ctx),
+                                    void *user_ctx) {
+    if (!replay) {
+        return;
+    }
+    replay->user_handler = handler;
+    replay->user_ctx = user_ctx;
+}
+
 void om_wal_replay_close(OmWalReplay *replay) {
     if (!replay) return;
 
@@ -589,7 +599,7 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
     uint16_t payload_len = om_wal_header_len(packed);
     
     /* Treat invalid type as EOF (handles zero padding at file end) */
-    if (type_byte < OM_WAL_INSERT || type_byte > OM_WAL_ACTIVATE) {
+    if (type_byte < OM_WAL_INSERT || (type_byte > OM_WAL_ACTIVATE && type_byte < OM_WAL_USER_BASE)) {
         return 0;  /* EOF - not a valid record */
     }
     *type = (OmWalType)type_byte;
@@ -662,8 +672,25 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
         replay->buffer_pos += *data_len + crc_size;
         replay->last_sequence = *sequence;
 
+        if (*type >= OM_WAL_USER_BASE && replay->user_handler) {
+            int ret = replay->user_handler(*type, *data, *data_len, replay->user_ctx);
+            if (ret != 0) {
+                return -1;
+            }
+        }
+
         return 1;
     }
+}
+
+uint64_t om_wal_append_custom(OmWal *wal, OmWalType type, const void *data, size_t len) {
+    if (!wal || !data) {
+        return 0;
+    }
+    if (type < OM_WAL_USER_BASE) {
+        return 0;
+    }
+    return wal_append(wal, type, data, len);
 }
 
 /* Helper to extract user data from INSERT record during replay */
