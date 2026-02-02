@@ -71,10 +71,28 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
         return 0;
     }
 
-    bool taker_is_bid = OM_IS_BID(taker->flags);
-    bool maker_is_bid = !taker_is_bid;
+    const bool taker_is_bid = OM_IS_BID(taker->flags);
+    const bool maker_is_bid = !taker_is_bid;
+    const uint64_t taker_price = taker->price;
 
     OmOrderbookContext *book = &engine->orderbook;
+    OmEngineCallbacks *cb = &engine->callbacks;
+    OmWal *wal = engine->wal;
+    const bool has_can_match = cb->can_match != NULL;
+    const bool has_on_match = cb->on_match != NULL;
+    const bool has_on_deal = cb->on_deal != NULL;
+    const bool has_on_filled = cb->on_filled != NULL;
+    const bool has_pre_booked = cb->pre_booked != NULL;
+    const bool has_on_booked = cb->on_booked != NULL;
+    const bool has_on_cancel = cb->on_cancel != NULL;
+
+    uint64_t match_ts_ns = 0;
+    if (wal) {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+            match_ts_ns = ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+        }
+    }
 
     OmSlabSlot *level = om_orderbook_get_best_head(book, product_id, maker_is_bid);
     uint32_t level_idx = level ? om_slot_get_idx(&book->slab, level) : OM_SLOT_IDX_NULL;
@@ -86,7 +104,6 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
         }
 
         uint64_t level_price = level->price;
-        uint64_t taker_price = taker->price;
 
         if (taker_is_bid) {
             if (taker_price < level_price) {
@@ -100,7 +117,6 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
 
         uint32_t next_level_idx = level->queue_nodes[OM_Q1_PRICE_LADDER].next_idx;
         uint32_t maker_idx = level_idx;
-        bool level_matched = false;
 
         while (maker_idx != OM_SLOT_IDX_NULL && taker_remaining > 0) {
             OmSlabSlot *maker = om_slot_from_idx(&book->slab, maker_idx);
@@ -122,8 +138,8 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
                 matchable = taker_remaining;
             }
 
-            if (engine->callbacks.can_match) {
-                uint64_t allowed = engine->callbacks.can_match(maker, taker, engine->callbacks.user_ctx);
+            if (has_can_match) {
+                uint64_t allowed = cb->can_match(maker, taker, cb->user_ctx);
                 if (allowed == 0) {
                     maker_idx = next_maker_idx;
                     continue;
@@ -138,42 +154,35 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
                 continue;
             }
 
-            level_matched = true;
             maker->volume_remain -= matchable;
             taker_remaining -= matchable;
             taker->volume_remain = taker_remaining;
 
-            if (engine->callbacks.on_match) {
-                engine->callbacks.on_match(maker, level_price, matchable, engine->callbacks.user_ctx);
-                engine->callbacks.on_match(taker, level_price, matchable, engine->callbacks.user_ctx);
+            if (has_on_match) {
+                cb->on_match(maker, level_price, matchable, cb->user_ctx);
+                cb->on_match(taker, level_price, matchable, cb->user_ctx);
             }
 
-            if (engine->callbacks.on_deal) {
-                engine->callbacks.on_deal(maker, taker, level_price, matchable, engine->callbacks.user_ctx);
+            if (has_on_deal) {
+                cb->on_deal(maker, taker, level_price, matchable, cb->user_ctx);
             }
 
-            if (engine->wal) {
-                struct timespec ts;
-                uint64_t ts_ns = 0;
-                if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
-                    ts_ns = ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
-                }
-
+            if (wal) {
                 OmWalMatch rec = {
                     .maker_id = maker->order_id,
                     .taker_id = taker->order_id,
                     .price = level_price,
                     .volume = matchable,
-                    .timestamp_ns = ts_ns,
+                    .timestamp_ns = match_ts_ns,
                     .product_id = product_id,
                     .reserved = {0, 0, 0}
                 };
-                om_wal_match(engine->wal, &rec);
+                om_wal_match(wal, &rec);
             }
 
             if (maker->volume_remain == 0) {
-                if (engine->callbacks.on_filled) {
-                    engine->callbacks.on_filled(maker, engine->callbacks.user_ctx);
+                if (has_on_filled) {
+                    cb->on_filled(maker, cb->user_ctx);
                 }
                 om_orderbook_remove_slot(book, product_id, maker);
                 maker_idx = next_maker_idx;
@@ -191,11 +200,6 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
             break;
         }
 
-        if (!level_matched) {
-            taker_remaining = 0;
-            taker->volume_remain = 0;
-            break;
-        }
         level_idx = next_level_idx;
     }
 
@@ -203,17 +207,17 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
         return 0;
     }
 
-    if (engine->callbacks.pre_booked) {
-        if (!engine->callbacks.pre_booked(taker, engine->callbacks.user_ctx)) {
-            if (engine->callbacks.on_cancel) {
-                engine->callbacks.on_cancel(taker, engine->callbacks.user_ctx);
+    if (has_pre_booked) {
+        if (!cb->pre_booked(taker, cb->user_ctx)) {
+            if (has_on_cancel) {
+                cb->on_cancel(taker, cb->user_ctx);
             }
             return 0;
         }
     }
 
-    if (engine->callbacks.on_booked) {
-        engine->callbacks.on_booked(taker, engine->callbacks.user_ctx);
+    if (has_on_booked) {
+        cb->on_booked(taker, cb->user_ctx);
     }
 
     return om_orderbook_insert(book, product_id, taker);

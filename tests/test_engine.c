@@ -343,7 +343,7 @@ START_TEST(test_engine_match_can_match_zero)
     ck_assert_int_eq(om_engine_match(&engine, 0, taker), 0);
 
     ck_assert_uint_eq(ctx.on_deal_calls, 0);
-    ck_assert_uint_eq(ctx.on_booked_calls, 0);
+    ck_assert_uint_eq(ctx.on_booked_calls, 1);
 
     om_engine_destroy(&engine);
 }
@@ -367,12 +367,36 @@ START_TEST(test_engine_match_can_match_skip_best)
     ctx.can_match_skip_once = true;
     ctx.can_match_calls = 0;
 
-    /* Toggle behavior: skip first call, allow second */
     ck_assert_int_eq(om_engine_match(&engine, 0, taker), 0);
 
     ck_assert_uint_eq(ctx.on_deal_calls, 1);
     ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&engine.orderbook, maker1->order_id));
     ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, maker2->order_id));
+
+    om_engine_destroy(&engine);
+}
+END_TEST
+
+START_TEST(test_engine_match_can_match_skip_level_then_book)
+{
+    OmEngine engine;
+    TestMatchCtx ctx = {0};
+    ctx.pre_booked_allow = true;
+    init_engine_with_ctx(&engine, &ctx);
+
+    OmSlabSlot *maker1 = make_order(&engine, 10000, 5, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, maker1), 0);
+
+    OmSlabSlot *maker2 = make_order(&engine, 10100, 5, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, maker2), 0);
+
+    OmSlabSlot *taker = make_order(&engine, 10100, 5, OM_SIDE_BID | OM_TYPE_LIMIT);
+
+    ctx.can_match_zero = true;
+    ck_assert_int_eq(om_engine_match(&engine, 0, taker), 0);
+
+    ck_assert_uint_eq(ctx.on_deal_calls, 0);
+    ck_assert_uint_eq(ctx.on_booked_calls, 1);
 
     om_engine_destroy(&engine);
 }
@@ -476,6 +500,7 @@ Suite *engine_suite(void)
     tcase_add_test(tc_core, test_engine_match_can_match_cap);
     tcase_add_test(tc_core, test_engine_match_can_match_zero);
     tcase_add_test(tc_core, test_engine_match_can_match_skip_best);
+    tcase_add_test(tc_core, test_engine_match_can_match_skip_level_then_book);
     tcase_add_test(tc_core, test_engine_match_pre_booked_false_cancels_remaining);
     tcase_add_test(tc_core, test_engine_match_multi_product_isolated);
     tcase_add_test(tc_core, test_engine_match_bid_vs_bid_no_cross);
