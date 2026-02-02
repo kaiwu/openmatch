@@ -457,6 +457,68 @@ START_TEST(test_wal_match_recovery_from_engine)
 }
 END_TEST
 
+START_TEST(test_wal_deactivate_activate_recovery)
+{
+    cleanup_wal_file();
+
+    OmSlabConfig slab_config = {
+        .user_data_size = 32,
+        .aux_data_size = 64,
+        .total_slots = 1000
+    };
+
+    OmWalConfig wal_config = {
+        .filename = TEST_WAL_FILE,
+        .buffer_size = 64 * 1024,
+        .sync_interval_ms = 0,
+        .use_direct_io = false,
+        .enable_crc32 = false,
+        .user_data_size = 32,
+        .aux_data_size = 64
+    };
+
+    OmEngine engine;
+    OmEngineConfig engine_config = {
+        .slab = slab_config,
+        .wal = &wal_config,
+        .callbacks = {0}
+    };
+
+    ck_assert_int_eq(om_engine_init(&engine, &engine_config), 0);
+
+    OmSlabSlot *maker = om_slab_alloc(&engine.orderbook.slab);
+    ck_assert_ptr_nonnull(maker);
+    om_slot_set_order_id(maker, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(maker, 10000);
+    om_slot_set_volume(maker, 10);
+    om_slot_set_volume_remain(maker, 10);
+    om_slot_set_flags(maker, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    om_slot_set_org(maker, 1);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, maker), 0);
+
+    ck_assert(om_engine_deactivate(&engine, maker->order_id));
+    ck_assert(om_engine_activate(&engine, maker->order_id));
+
+    om_wal_flush(engine.wal);
+    om_wal_fsync(engine.wal);
+
+    uint32_t order_id = maker->order_id;
+
+    om_engine_destroy(&engine);
+
+    OmOrderbookContext ctx2;
+    ck_assert_int_eq(om_orderbook_init(&ctx2, &slab_config, NULL), 0);
+
+    OmWalReplayStats stats;
+    ck_assert_int_eq(om_orderbook_recover_from_wal(&ctx2, TEST_WAL_FILE, &stats), 0);
+
+    ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&ctx2, order_id));
+
+    om_orderbook_destroy(&ctx2);
+    cleanup_wal_file();
+}
+END_TEST
+
 START_TEST(test_wal_aux_data_persistence)
 {
     cleanup_wal_file();
@@ -620,6 +682,7 @@ Suite *wal_suite(void)
     tcase_add_test(tc_core, test_wal_timestamp_populated);
     tcase_add_test(tc_core, test_wal_match_replay);
     tcase_add_test(tc_core, test_wal_match_recovery_from_engine);
+    tcase_add_test(tc_core, test_wal_deactivate_activate_recovery);
 
     suite_add_tcase(s, tc_core);
     return s;

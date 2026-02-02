@@ -11,6 +11,7 @@ typedef struct TestMatchCtx {
     uint64_t on_cancel_calls;
     uint64_t can_match_cap;
     bool can_match_zero;
+    bool can_match_skip_once;
     bool pre_booked_allow;
 } TestMatchCtx;
 
@@ -20,6 +21,10 @@ static uint64_t test_can_match(const OmSlabSlot *maker, const OmSlabSlot *taker,
     (void)taker;
     TestMatchCtx *ctx = (TestMatchCtx *)user_ctx;
     ctx->can_match_calls++;
+    if (ctx->can_match_skip_once) {
+        ctx->can_match_skip_once = false;
+        return 0;
+    }
     if (ctx->can_match_zero) {
         return 0;
     }
@@ -338,7 +343,36 @@ START_TEST(test_engine_match_can_match_zero)
     ck_assert_int_eq(om_engine_match(&engine, 0, taker), 0);
 
     ck_assert_uint_eq(ctx.on_deal_calls, 0);
-    ck_assert_uint_eq(ctx.on_booked_calls, 1);
+    ck_assert_uint_eq(ctx.on_booked_calls, 0);
+
+    om_engine_destroy(&engine);
+}
+END_TEST
+
+START_TEST(test_engine_match_can_match_skip_best)
+{
+    OmEngine engine;
+    TestMatchCtx ctx = {0};
+    ctx.pre_booked_allow = true;
+    init_engine_with_ctx(&engine, &ctx);
+
+    OmSlabSlot *maker1 = make_order(&engine, 10000, 5, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    OmSlabSlot *maker2 = make_order(&engine, 10000, 5, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, maker1), 0);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, maker2), 0);
+
+    OmSlabSlot *taker = make_order(&engine, 10000, 5, OM_SIDE_BID | OM_TYPE_LIMIT);
+
+    /* First maker skipped, second allowed */
+    ctx.can_match_skip_once = true;
+    ctx.can_match_calls = 0;
+
+    /* Toggle behavior: skip first call, allow second */
+    ck_assert_int_eq(om_engine_match(&engine, 0, taker), 0);
+
+    ck_assert_uint_eq(ctx.on_deal_calls, 1);
+    ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&engine.orderbook, maker1->order_id));
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, maker2->order_id));
 
     om_engine_destroy(&engine);
 }
@@ -404,6 +438,27 @@ START_TEST(test_engine_match_bid_vs_bid_no_cross)
 }
 END_TEST
 
+START_TEST(test_engine_deactivate_activate)
+{
+    OmEngine engine;
+    TestMatchCtx ctx = {0};
+    ctx.pre_booked_allow = true;
+    init_engine_with_ctx(&engine, &ctx);
+
+    OmSlabSlot *maker = make_order(&engine, 10000, 5, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, maker), 0);
+
+    ck_assert(om_engine_deactivate(&engine, maker->order_id));
+    ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&engine.orderbook, maker->order_id));
+    ck_assert_uint_eq((maker->flags & OM_STATUS_MASK), OM_STATUS_DEACTIVATED);
+
+    ck_assert(om_engine_activate(&engine, maker->order_id));
+    ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&engine.orderbook, maker->order_id));
+
+    om_engine_destroy(&engine);
+}
+END_TEST
+
 Suite *engine_suite(void)
 {
     Suite *s = suite_create("Engine");
@@ -420,9 +475,11 @@ Suite *engine_suite(void)
     tcase_add_test(tc_core, test_engine_match_same_price_fifo);
     tcase_add_test(tc_core, test_engine_match_can_match_cap);
     tcase_add_test(tc_core, test_engine_match_can_match_zero);
+    tcase_add_test(tc_core, test_engine_match_can_match_skip_best);
     tcase_add_test(tc_core, test_engine_match_pre_booked_false_cancels_remaining);
     tcase_add_test(tc_core, test_engine_match_multi_product_isolated);
     tcase_add_test(tc_core, test_engine_match_bid_vs_bid_no_cross);
+    tcase_add_test(tc_core, test_engine_deactivate_activate);
 
     suite_add_tcase(s, tc_core);
     return s;

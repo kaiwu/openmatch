@@ -355,6 +355,36 @@ uint64_t om_wal_cancel(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_
     return wal_append(wal, OM_WAL_CANCEL, &rec, sizeof(OmWalCancel));
 }
 
+uint64_t om_wal_deactivate(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id) {
+    if (!wal) {
+        return 0;
+    }
+
+    OmWalDeactivate rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.order_id = order_id;
+    rec.timestamp_ns = wal_get_timestamp_ns();
+    rec.slot_idx = slot_idx;
+    rec.product_id = product_id;
+
+    return wal_append(wal, OM_WAL_DEACTIVATE, &rec, sizeof(OmWalDeactivate));
+}
+
+uint64_t om_wal_activate(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id) {
+    if (!wal) {
+        return 0;
+    }
+
+    OmWalActivate rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.order_id = order_id;
+    rec.timestamp_ns = wal_get_timestamp_ns();
+    rec.slot_idx = slot_idx;
+    rec.product_id = product_id;
+
+    return wal_append(wal, OM_WAL_ACTIVATE, &rec, sizeof(OmWalActivate));
+}
+
 uint64_t om_wal_match(OmWal *wal, const OmWalMatch *rec) {
     if (!wal || !rec) {
         return 0;

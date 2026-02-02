@@ -20,6 +20,8 @@ typedef enum OmWalType {
     OM_WAL_CANCEL = 2,      /* 32 bytes */
     OM_WAL_MATCH = 3,       /* 48 bytes */
     OM_WAL_CHECKPOINT = 4,  /* 32 bytes */
+    OM_WAL_DEACTIVATE = 5,  /* 32 bytes */
+    OM_WAL_ACTIVATE = 6,    /* 32 bytes */
 } OmWalType;
 
 /* Compact record header - 8 bytes */
@@ -66,6 +68,24 @@ typedef struct OmWalCancel {
     uint16_t reserved;          /* 2 bytes - padding */
     /* Total payload: 24 bytes + 8 byte header = 32 bytes */
 } OmWalCancel;
+
+/* Deactivate record - total 32 bytes */
+typedef struct OmWalDeactivate {
+    uint64_t order_id;          /* 8 bytes - order being deactivated */
+    uint64_t timestamp_ns;      /* 8 bytes - deactivate timestamp */
+    uint32_t slot_idx;          /* 4 bytes - slot index being removed */
+    uint16_t product_id;        /* 2 bytes - product ID */
+    uint16_t reserved;          /* 2 bytes - padding */
+} OmWalDeactivate;
+
+/* Activate record - total 32 bytes */
+typedef struct OmWalActivate {
+    uint64_t order_id;          /* 8 bytes - order being activated */
+    uint64_t timestamp_ns;      /* 8 bytes - activate timestamp */
+    uint32_t slot_idx;          /* 4 bytes - slot index being activated */
+    uint16_t product_id;        /* 2 bytes - product ID */
+    uint16_t reserved;          /* 2 bytes - padding */
+} OmWalActivate;
 
 /* Match record - total 48 bytes */
 typedef struct OmWalMatch {
@@ -141,6 +161,12 @@ uint64_t om_wal_insert(OmWal *wal, struct OmSlabSlot *slot, uint16_t product_id)
 
 /* Log cancel to WAL */
 uint64_t om_wal_cancel(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id);
+
+/* Log deactivate to WAL */
+uint64_t om_wal_deactivate(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id);
+
+/* Log activate to WAL */
+uint64_t om_wal_activate(OmWal *wal, uint32_t order_id, uint32_t slot_idx, uint16_t product_id);
 
 /* Log match to WAL */
 uint64_t om_wal_match(OmWal *wal, const OmWalMatch *rec);

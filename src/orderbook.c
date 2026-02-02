@@ -485,6 +485,86 @@ bool om_orderbook_remove_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSl
     return true;
 }
 
+bool om_orderbook_unlink_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSlabSlot *order)
+{
+    uint64_t price = order->price;
+    bool is_bid = OM_IS_BID(order->flags);
+
+    OmSlabSlot *unused = NULL;
+    OmSlabSlot *head = find_price_level_with_insertion_point(ctx, product_id, price, is_bid, &unused);
+    if (!head) {
+        return false;
+    }
+
+    uint32_t head_idx = om_slot_get_idx(&ctx->slab, head);
+    uint32_t next_idx = order->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
+    uint32_t prev_q2_idx = order->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
+
+    if (order == head) {
+        if (next_idx == OM_SLOT_IDX_NULL) {
+            remove_price_level(ctx, product_id, head, is_bid);
+        } else {
+            OmProductBook *book = &ctx->products[product_id];
+            uint32_t *book_head = is_bid ? &book->bid_head_q1 : &book->ask_head_q1;
+            OmSlabSlot *next = om_slot_from_idx(&ctx->slab, next_idx);
+
+            next->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
+            if (next->queue_nodes[OM_Q2_TIME_FIFO].next_idx == OM_SLOT_IDX_NULL) {
+                next->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+            }
+
+            if (next->queue_nodes[OM_Q2_TIME_FIFO].next_idx != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *after = om_slot_from_idx(&ctx->slab,
+                                                     next->queue_nodes[OM_Q2_TIME_FIFO].next_idx);
+                if (after) {
+                    after->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = om_slot_get_idx(&ctx->slab, next);
+                }
+            }
+
+            uint32_t prev_q1 = head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx;
+            uint32_t next_q1 = head->queue_nodes[OM_Q1_PRICE_LADDER].next_idx;
+
+            next->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = prev_q1;
+            next->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = next_q1;
+
+            if (*book_head == head_idx) {
+                *book_head = next_idx;
+            }
+
+            if (prev_q1 != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *prev = om_slot_from_idx(&ctx->slab, prev_q1);
+                if (prev) {
+                    prev->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = next_idx;
+                }
+            }
+
+            if (next_q1 != OM_SLOT_IDX_NULL) {
+                OmSlabSlot *q1_next = om_slot_from_idx(&ctx->slab, next_q1);
+                if (q1_next) {
+                    q1_next->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = next_idx;
+                }
+            }
+
+            head->queue_nodes[OM_Q1_PRICE_LADDER].next_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q1_PRICE_LADDER].prev_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q2_TIME_FIFO].next_idx = OM_SLOT_IDX_NULL;
+            head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+        }
+    } else {
+        om_queue_unlink(&ctx->slab, order, OM_Q2_TIME_FIFO);
+        if (next_idx == OM_SLOT_IDX_NULL) {
+            if (prev_q2_idx == head_idx) {
+                head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = OM_SLOT_IDX_NULL;
+            } else {
+                head->queue_nodes[OM_Q2_TIME_FIFO].prev_idx = prev_q2_idx;
+            }
+        }
+    }
+
+    om_queue_unlink(&ctx->slab, order, OM_Q3_ORG_QUEUE);
+    return true;
+}
+
 bool om_orderbook_price_level_exists(const OmOrderbookContext *ctx,
                                       uint16_t product_id, uint64_t price,
                                       bool is_bid)
@@ -644,6 +724,52 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
                 
                 if (stats) {
                     stats->records_match++;
+                    stats->last_sequence = sequence;
+                }
+                break;
+            }
+
+            case OM_WAL_DEACTIVATE: {
+                if (data_len != sizeof(OmWalDeactivate)) {
+                    continue;
+                }
+                OmWalDeactivate rec;
+                memcpy(&rec, data, sizeof(OmWalDeactivate));
+
+                OmOrderEntry *entry = om_hash_get(ctx->order_hashmap, rec.order_id);
+                if (entry) {
+                    OmSlabSlot *slot = om_slot_from_idx(&ctx->slab, entry->slot_idx);
+                    if (slot) {
+                        om_orderbook_unlink_slot(ctx, entry->product_id, slot);
+                        slot->flags = OM_SET_STATUS(slot->flags, OM_STATUS_DEACTIVATED);
+                    }
+                }
+
+                if (stats) {
+                    stats->records_other++;
+                    stats->last_sequence = sequence;
+                }
+                break;
+            }
+
+            case OM_WAL_ACTIVATE: {
+                if (data_len != sizeof(OmWalActivate)) {
+                    continue;
+                }
+                OmWalActivate rec;
+                memcpy(&rec, data, sizeof(OmWalActivate));
+
+                OmOrderEntry *entry = om_hash_get(ctx->order_hashmap, rec.order_id);
+                if (entry) {
+                    OmSlabSlot *slot = om_slot_from_idx(&ctx->slab, entry->slot_idx);
+                    if (slot && (slot->flags & OM_STATUS_MASK) == OM_STATUS_DEACTIVATED) {
+                        slot->flags = OM_SET_STATUS(slot->flags, OM_STATUS_NEW);
+                        om_orderbook_insert(ctx, entry->product_id, slot);
+                    }
+                }
+
+                if (stats) {
+                    stats->records_other++;
                     stats->last_sequence = sequence;
                 }
                 break;

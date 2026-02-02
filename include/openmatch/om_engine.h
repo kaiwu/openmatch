@@ -272,4 +272,22 @@ static inline bool om_engine_has_pre_booked(const OmEngine *engine) {
  */
 int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker);
 
+/**
+ * Deactivate a resting order and remove it from the book without freeing it
+ *
+ * @param engine Engine context
+ * @param order_id Order ID to deactivate
+ * @return true if deactivated, false if not found or not active
+ */
+bool om_engine_deactivate(OmEngine *engine, uint32_t order_id);
+
+/**
+ * Activate a previously deactivated order and re-run matching as taker
+ *
+ * @param engine Engine context
+ * @param order_id Order ID to activate
+ * @return true if activated, false if not found or not deactivated
+ */
+bool om_engine_activate(OmEngine *engine, uint32_t order_id);
+
 #endif /* OM_ENGINE_H */

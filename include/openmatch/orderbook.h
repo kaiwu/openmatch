@@ -147,6 +147,17 @@ uint32_t om_orderbook_get_price_level_count(const OmOrderbookContext *ctx,
 bool om_orderbook_remove_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSlabSlot *order);
 
 /**
+ * Remove an order slot from the orderbook without freeing it
+ * Leaves the slot allocated and in hashmap.
+ *
+ * @param ctx Orderbook context
+ * @param product_id Product ID
+ * @param order Order slot to remove
+ * @return true if removed, false if not found
+ */
+bool om_orderbook_unlink_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSlabSlot *order);
+
+/**
  * Get best price level head slot for product side
  *
  * @param ctx Orderbook context

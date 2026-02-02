@@ -30,6 +30,7 @@
 #define OM_STATUS_FILLED    0x00000040U  /**< Bits 5-7 = 2: Fully filled */
 #define OM_STATUS_CANCELLED 0x00000060U  /**< Bits 5-7 = 3: Cancelled */
 #define OM_STATUS_REJECTED  0x00000080U  /**< Bits 5-7 = 4: Rejected */
+#define OM_STATUS_DEACTIVATED 0x000000A0U  /**< Bits 5-7 = 5: Deactivated */
 #define OM_STATUS_MASK      0x000000E0U  /**< Bits 5-7 mask */
 
 /* Bit manipulation helpers */
