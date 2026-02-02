@@ -6,6 +6,7 @@
 #include "om_slab.h"
 #include "orderbook.h"
 #include "om_wal.h"
+#include "om_perf.h"
 
 /**
  * @file om_engine.h
@@ -130,7 +131,9 @@ typedef struct OmEngineConfig {
     OmWalConfig *wal;           /**< Optional WAL configuration (NULL to disable) */
     uint32_t max_products;       /**< Number of products to allocate */
     uint32_t max_org;            /**< Number of orgs to allocate per product */
+    uint32_t hashmap_initial_cap; /**< Initial hashmap capacity (0 = default) */
     OmEngineCallbacks callbacks; /**< Callback configuration */
+    const OmPerfConfig *perf;     /**< Optional perf preset (overrides sizes/flags) */
 } OmEngineConfig;
 
 /**
@@ -161,6 +164,16 @@ typedef struct OmEngine {
  *   -4: Orderbook initialization failed
  */
 int om_engine_init(OmEngine *engine, const OmEngineConfig *config);
+
+/**
+ * Initialize matching engine using a performance preset
+ *
+ * @param engine Engine context to initialize
+ * @param config Engine configuration (callbacks + optional WAL)
+ * @param perf Performance preset to apply
+ * @return 0 on success, negative on error
+ */
+int om_engine_init_perf(OmEngine *engine, const OmEngineConfig *config, const OmPerfConfig *perf);
 
 /**
  * Destroy matching engine and free all resources

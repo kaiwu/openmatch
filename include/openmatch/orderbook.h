@@ -32,7 +32,7 @@ typedef struct OmOrderbookContext {
  * @return 0 on success, negative on error
  */
 int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal,
-                      uint32_t max_products, uint32_t max_org);
+                      uint32_t max_products, uint32_t max_org, uint32_t hashmap_initial_cap);
 
 /**
  * Destroy orderbook context and free all resources

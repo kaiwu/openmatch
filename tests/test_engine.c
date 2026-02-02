@@ -93,6 +93,8 @@ static void init_engine_with_ctx(OmEngine *engine, TestMatchCtx *ctx)
         .wal = NULL,
         .max_products = 10,
         .max_org = 100,
+        .hashmap_initial_cap = 0,
+        .perf = NULL,
         .callbacks = {
             .can_match = test_can_match,
             .on_match = test_on_match,

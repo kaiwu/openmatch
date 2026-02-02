@@ -12,14 +12,51 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
     memset(engine, 0, sizeof(OmEngine));
 
     struct OmWal *wal_ptr = NULL;
+    OmSlabConfig slab_cfg = config->slab;
+    OmWalConfig *wal_cfg = config->wal;
+    OmWalConfig wal_cfg_local;
+    const OmPerfConfig *perf = config->perf;
 
-    if (config->wal) {
+    uint32_t max_products = config->max_products;
+    uint32_t max_org = config->max_org;
+    uint32_t hashmap_cap = config->hashmap_initial_cap;
+
+    if (perf) {
+        slab_cfg.user_data_size = perf->slab_user_data_size;
+        slab_cfg.aux_data_size = perf->slab_aux_data_size;
+        slab_cfg.total_slots = perf->slab_total_slots;
+
+        if (hashmap_cap == 0) {
+            hashmap_cap = perf->hashmap_initial_cap;
+        }
+
+        if (wal_cfg) {
+            wal_cfg_local = *wal_cfg;
+            wal_cfg_local.buffer_size = perf->wal_buffer_size;
+            wal_cfg_local.sync_interval_ms = perf->wal_sync_interval_ms;
+            wal_cfg_local.use_direct_io = perf->wal_use_direct_io;
+            wal_cfg_local.enable_crc32 = perf->wal_enable_crc32;
+            wal_cfg_local.user_data_size = slab_cfg.user_data_size;
+            wal_cfg_local.aux_data_size = slab_cfg.aux_data_size;
+            wal_cfg = &wal_cfg_local;
+        }
+    }
+
+    if (max_products == 0 || max_org == 0) {
+        return -1;
+    }
+
+    if (hashmap_cap == 0) {
+        hashmap_cap = slab_cfg.total_slots;
+    }
+
+    if (wal_cfg) {
         engine->wal = malloc(sizeof(struct OmWal));
         if (!engine->wal) {
             return -3;
         }
         
-        int wal_ret = om_wal_init(engine->wal, config->wal);
+        int wal_ret = om_wal_init(engine->wal, wal_cfg);
         if (wal_ret != 0) {
             free(engine->wal);
             engine->wal = NULL;
@@ -29,12 +66,8 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
         wal_ptr = engine->wal;
     }
 
-    if (config->max_products == 0 || config->max_org == 0) {
-        return -1;
-    }
-
-    int ob_ret = om_orderbook_init(&engine->orderbook, &config->slab, wal_ptr,
-                                   config->max_products, config->max_org);
+    int ob_ret = om_orderbook_init(&engine->orderbook, &slab_cfg, wal_ptr,
+                                   max_products, max_org, hashmap_cap);
     if (ob_ret != 0) {
         if (engine->wal_owned && engine->wal) {
             om_wal_close(engine->wal);
@@ -47,6 +80,16 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
     engine->callbacks = config->callbacks;
 
     return 0;
+}
+
+int om_engine_init_perf(OmEngine *engine, const OmEngineConfig *config, const OmPerfConfig *perf)
+{
+    if (!config) {
+        return -1;
+    }
+    OmEngineConfig cfg = *config;
+    cfg.perf = perf;
+    return om_engine_init(engine, &cfg);
 }
 
 void om_engine_destroy(OmEngine *engine)

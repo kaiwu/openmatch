@@ -3,7 +3,7 @@
 #include <string.h>
 
 int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal,
-                      uint32_t max_products, uint32_t max_org)
+                      uint32_t max_products, uint32_t max_org, uint32_t hashmap_initial_cap)
 {
     if (!ctx || !config) {
         return -1;
@@ -49,7 +49,8 @@ int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struc
     }
 
     /* Create order hashmap with initial capacity matching slab */
-    ctx->order_hashmap = om_hash_create(config->total_slots);
+    uint32_t hash_cap = hashmap_initial_cap ? hashmap_initial_cap : config->total_slots;
+    ctx->order_hashmap = om_hash_create(hash_cap);
     if (!ctx->order_hashmap) {
         om_slab_destroy(&ctx->slab);
         free(ctx->org_heads);

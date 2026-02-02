@@ -8,8 +8,10 @@ but small and embeddable.
 
 - **Dual slab allocator** for fixed hot fields + separate aux (cold) data.
 - **Orderbook** with price ladder (Q1) and time FIFO (Q2) queues.
+- **Org queue (Q3)** per product for org-level batch cancel.
 - **Order ID hashmap** for O(1) cancel/lookup.
 - **Write‑ahead log (WAL)** with CRC32 option, replay, and sequence recovery.
+- **Matching engine** with callback hooks and WAL deal logging.
 - **Perf presets** for HFT, durability, recovery, and minimal memory.
 
 ## Project Layout
@@ -22,9 +24,16 @@ but small and embeddable.
 │   ├── om_hash.h             # Hashmap (khash/khashl)
 │   ├── om_wal.h              # WAL API + replay
 │   ├── om_perf.h             # Performance presets
+│   ├── om_engine.h           # Matching engine API
 │   └── om_wal_mock.h         # WAL mock (prints to stderr)
 ├── src/                      # Implementations
+│   └── om_engine.c           # Matching engine
 ├── tests/                    # check-based unit tests
+├── tools/                    # Utility binaries + awk helpers
+│   ├── wal_reader.c
+│   ├── wal_trace_oid.awk
+│   ├── wal_match_by_maker.awk
+│   └── wal_sum_qty_by_maker.awk
 └── deps/                     # submodules (klib, check)
 ```
 
@@ -84,6 +93,7 @@ Per product:
 
 - **Q1** is a sorted price ladder (best price at head)
 - **Q2** is FIFO list for orders at each price level
+- **Q3** is org queue per product (for batch cancel)
 - **Hashmap** maps `order_id → (slot_idx, product_id)` for O(1) cancel
 
 API highlights:
@@ -91,6 +101,7 @@ API highlights:
 - `om_orderbook_init()` / `om_orderbook_destroy()`
 - `om_orderbook_insert()`
 - `om_orderbook_cancel()`
+- `om_orderbook_cancel_org_product()` / `om_orderbook_cancel_org_all()`
 - `om_orderbook_get_best_bid()` / `om_orderbook_get_best_ask()`
 
 ### WAL (`om_wal`)
@@ -100,6 +111,7 @@ Append-only log with replay support. Record types:
 - `OM_WAL_INSERT` (variable length: fixed fields + user + aux data)
 - `OM_WAL_CANCEL`
 - `OM_WAL_MATCH`
+- `OM_WAL_DEACTIVATE` / `OM_WAL_ACTIVATE`
 
 Replay API:
 
@@ -112,6 +124,8 @@ Replay API:
 Presets include `OM_PERF_DEFAULT`, `OM_PERF_HFT`, `OM_PERF_DURABLE`,
 `OM_PERF_RECOVERY`, `OM_PERF_MINIMAL`. Use `om_perf_validate()` and
 `om_perf_autotune()` to verify/tune.
+
+Engine can apply a preset via `OmEngineConfig.perf` or `om_engine_init_perf()`.
 
 ## Example (Minimal)
 
@@ -134,7 +148,7 @@ OmWal wal;
 om_wal_init(&wal, &wal_cfg);
 
 OmOrderbookContext ctx;
-om_orderbook_init(&ctx, &slab_cfg, &wal);
+om_orderbook_init(&ctx, &slab_cfg, &wal, 1024, 1024, 0);
 
 OmSlabSlot *slot = om_slab_alloc(&ctx.slab);
 om_slot_set_order_id(slot, om_slab_next_order_id(&ctx.slab));
@@ -154,12 +168,12 @@ om_wal_close(&wal);
 
 ## Roadmap / Missing Parts
 
-1. **Matching engine** (price‑time priority, market/IOC/FOK behavior).
-2. **Org queue (Q3)** implementation and org-level controls.
-3. **Snapshotting** (state dump + WAL checkpointing).
-4. **Async I/O** in WAL (flag exists, not implemented).
-5. **Multi‑threading** (lock-free or sharded per-product orderbooks).
-6. **Config wiring** from `om_perf` into live components.
+1. **Order types** (market/IOC/FOK logic beyond limit‑only matching).
+2. **Snapshotting** (state dump + WAL checkpointing).
+3. **Async I/O** in WAL (flag exists, not implemented).
+4. **Multi‑threading** (lock-free or sharded per-product orderbooks).
+5. **Config wiring** from `om_perf` into live components.
+6. **Risk/limits hooks** (self-trade prevention, credit limits, throttling).
 7. **More validation** (parameter checks, error codes, and recovery guarantees).
 
 ## Tools
@@ -215,3 +229,17 @@ List all activates/deactivates:
 ## License
 
 MIT
+### Engine (`om_engine`)
+
+Callback-driven matching core. Supports:
+
+- `can_match` (per maker/taker; returns max match volume)
+- `on_match` (per order, post‑deduction)
+- `on_deal` (per trade)
+- `on_booked` / `on_filled` / `on_cancel`
+- `pre_booked` (decide whether remainder rests)
+
+Order deactivation/activation:
+
+- `om_engine_deactivate(order_id)` (remove from book, keep slot)
+- `om_engine_activate(order_id)` (reattempt match as taker)

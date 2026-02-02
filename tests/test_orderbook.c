@@ -14,7 +14,7 @@ START_TEST(test_orderbook_init)
         .total_slots = 1000
     };
 
-    int ret = om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    int ret = om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
     ck_assert_int_eq(ret, 0);
 
     /* Verify product books are initialized */
@@ -37,7 +37,7 @@ START_TEST(test_orderbook_insert_bid)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Create a bid order */
     OmSlabSlot *order = om_slab_alloc(&ctx.slab);
@@ -80,7 +80,7 @@ START_TEST(test_orderbook_insert_multiple_bids_same_price)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Create three bid orders at same price */
     for (int i = 0; i < 3; i++) {
@@ -121,7 +121,7 @@ START_TEST(test_orderbook_insert_bids_sorted)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Insert bids at different prices */
     uint64_t prices[] = {9900, 10100, 10000};
@@ -164,7 +164,7 @@ START_TEST(test_orderbook_insert_ask)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Create an ask order */
     OmSlabSlot *order = om_slab_alloc(&ctx.slab);
@@ -200,7 +200,7 @@ START_TEST(test_orderbook_insert_asks_sorted)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Insert asks at different prices */
     uint64_t prices[] = {10200, 10000, 10100};
@@ -243,7 +243,7 @@ START_TEST(test_orderbook_cancel)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Create and insert a bid order */
     OmSlabSlot *order = om_slab_alloc(&ctx.slab);
@@ -288,7 +288,7 @@ START_TEST(test_orderbook_cancel_partial)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Create two bid orders at same price - store order IDs */
     uint32_t order_id1 = om_slab_next_order_id(&ctx.slab);
@@ -347,7 +347,7 @@ START_TEST(test_orderbook_cancel_best_price)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     OmSlabSlot *best = om_slab_alloc(&ctx.slab);
     ck_assert_ptr_nonnull(best);
@@ -392,7 +392,7 @@ START_TEST(test_orderbook_cancel_head_same_price_tail)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     uint32_t order_ids[3];
     for (int i = 0; i < 3; i++) {
@@ -432,7 +432,7 @@ START_TEST(test_orderbook_multiple_products)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Insert orders into two different products */
     for (int prod = 0; prod < 2; prod++) {
@@ -465,7 +465,7 @@ START_TEST(test_orderbook_hashmap_lookup)
         .total_slots = 1000
     };
 
-    om_orderbook_init(&ctx, &config, NULL, 10, 100);
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
 
     /* Create and insert an order */
     uint32_t order_id = om_slab_next_order_id(&ctx.slab);

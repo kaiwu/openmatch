@@ -41,7 +41,7 @@ START_TEST(test_wal_basic_write_recovery)
     ck_assert_int_eq(om_wal_init(&wal, &wal_config), 0);
 
     OmOrderbookContext ctx;
-    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100, 0), 0);
 
     uint32_t order_id = om_slab_next_order_id(&ctx.slab);
     OmSlabSlot *slot = om_slab_alloc(&ctx.slab);
@@ -71,7 +71,7 @@ START_TEST(test_wal_basic_write_recovery)
     om_orderbook_destroy(&ctx);
 
     OmOrderbookContext ctx2;
-    ck_assert_int_eq(om_orderbook_init(&ctx2, &config, NULL, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx2, &config, NULL, 10, 100, 0), 0);
 
     OmWalReplayStats stats;
     ck_assert_int_eq(om_orderbook_recover_from_wal(&ctx2, TEST_WAL_FILE, &stats), 0);
@@ -132,7 +132,7 @@ START_TEST(test_wal_sequence_recovery)
     ck_assert_uint_eq(om_wal_sequence(&wal), 1);
 
     OmOrderbookContext ctx;
-    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100, 0), 0);
 
     for (int i = 0; i < 5; i++) {
         uint32_t order_id = om_slab_next_order_id(&ctx.slab);
@@ -157,7 +157,7 @@ START_TEST(test_wal_sequence_recovery)
     ck_assert_uint_eq(om_wal_sequence(&wal2), 6);
 
     OmOrderbookContext ctx2;
-    ck_assert_int_eq(om_orderbook_init(&ctx2, &config, &wal2, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx2, &config, &wal2, 10, 100, 0), 0);
 
     for (int i = 0; i < 3; i++) {
         uint32_t order_id = om_slab_next_order_id(&ctx2.slab);
@@ -202,7 +202,7 @@ START_TEST(test_wal_crc32_validation)
     ck_assert_int_eq(om_wal_init(&wal, &wal_config), 0);
 
     OmOrderbookContext ctx;
-    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100, 0), 0);
 
     uint32_t order_id = om_slab_next_order_id(&ctx.slab);
     OmSlabSlot *slot = om_slab_alloc(&ctx.slab);
@@ -273,7 +273,7 @@ START_TEST(test_wal_crc32_mismatch)
     ck_assert_int_eq(om_wal_init(&wal, &wal_config), 0);
 
     OmOrderbookContext ctx;
-    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100, 0), 0);
 
     uint32_t order_id = om_slab_next_order_id(&ctx.slab);
     OmSlabSlot *slot = om_slab_alloc(&ctx.slab);
@@ -443,7 +443,7 @@ START_TEST(test_wal_match_recovery_from_engine)
     om_engine_destroy(&engine);
 
     OmOrderbookContext ctx2;
-    ck_assert_int_eq(om_orderbook_init(&ctx2, &slab_config, NULL, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx2, &slab_config, NULL, 10, 100, 0), 0);
 
     OmWalReplayStats stats;
     ck_assert_int_eq(om_orderbook_recover_from_wal(&ctx2, TEST_WAL_FILE, &stats), 0);
@@ -511,7 +511,7 @@ START_TEST(test_wal_deactivate_activate_recovery)
     om_engine_destroy(&engine);
 
     OmOrderbookContext ctx2;
-    ck_assert_int_eq(om_orderbook_init(&ctx2, &slab_config, NULL, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx2, &slab_config, NULL, 10, 100, 0), 0);
 
     OmWalReplayStats stats;
     ck_assert_int_eq(om_orderbook_recover_from_wal(&ctx2, TEST_WAL_FILE, &stats), 0);
@@ -547,7 +547,7 @@ START_TEST(test_wal_aux_data_persistence)
     ck_assert_int_eq(om_wal_init(&wal, &wal_config), 0);
 
     OmOrderbookContext ctx;
-    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100, 0), 0);
 
     uint32_t order_ids[10];
     for (int i = 0; i < 10; i++) {
@@ -580,7 +580,7 @@ START_TEST(test_wal_aux_data_persistence)
     om_orderbook_destroy(&ctx);
 
     OmOrderbookContext ctx2;
-    ck_assert_int_eq(om_orderbook_init(&ctx2, &config, NULL, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx2, &config, NULL, 10, 100, 0), 0);
 
     OmWalReplayStats stats;
     ck_assert_int_eq(om_orderbook_recover_from_wal(&ctx2, TEST_WAL_FILE, &stats), 0);
@@ -637,7 +637,7 @@ START_TEST(test_wal_timestamp_populated)
     ck_assert_int_eq(om_wal_init(&wal, &wal_config), 0);
 
     OmOrderbookContext ctx;
-    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100), 0);
+    ck_assert_int_eq(om_orderbook_init(&ctx, &config, &wal, 10, 100, 0), 0);
 
     uint32_t order_id = om_slab_next_order_id(&ctx.slab);
     OmSlabSlot *slot = om_slab_alloc(&ctx.slab);
