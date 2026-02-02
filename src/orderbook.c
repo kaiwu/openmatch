@@ -250,12 +250,11 @@ bool om_orderbook_cancel(OmOrderbookContext *ctx, uint32_t order_id)
         return false;  /* Price level not found */
     }
 
-    uint32_t order_idx = om_slot_get_idx(&ctx->slab, order);
     uint32_t head_idx = om_slot_get_idx(&ctx->slab, head);
     uint32_t next_idx = order->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
     uint32_t prev_q2_idx = order->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
 
-    if (order_idx == head_idx) {
+    if (order == head) {
         if (next_idx == OM_SLOT_IDX_NULL) {
             /* No more orders at this price - remove price level */
             remove_price_level(ctx, product_id, head, is_bid);
@@ -414,12 +413,11 @@ bool om_orderbook_remove_slot(OmOrderbookContext *ctx, uint16_t product_id, OmSl
         return false;
     }
 
-    uint32_t order_idx = om_slot_get_idx(&ctx->slab, order);
     uint32_t head_idx = om_slot_get_idx(&ctx->slab, head);
     uint32_t next_idx = order->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
     uint32_t prev_q2_idx = order->queue_nodes[OM_Q2_TIME_FIFO].prev_idx;
 
-    if (order_idx == head_idx) {
+    if (order == head) {
         if (next_idx == OM_SLOT_IDX_NULL) {
             remove_price_level(ctx, product_id, head, is_bid);
         } else {

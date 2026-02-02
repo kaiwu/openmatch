@@ -311,12 +311,13 @@ START_TEST(test_engine_match_can_match_cap)
     OmSlabSlot *maker = make_order(&engine, 10000, 10, OM_SIDE_ASK | OM_TYPE_LIMIT);
     ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, maker), 0);
 
-    OmSlabSlot *taker = make_order(&engine, 10100, 10, OM_SIDE_BID | OM_TYPE_LIMIT);
+    OmSlabSlot *taker = make_order(&engine, 10100, 3, OM_SIDE_BID | OM_TYPE_LIMIT);
     ck_assert_int_eq(om_engine_match(&engine, 0, taker), 0);
 
     OmSlabSlot *maker_left = om_orderbook_get_slot_by_id(&engine.orderbook, maker->order_id);
     ck_assert_ptr_nonnull(maker_left);
     ck_assert_uint_eq(maker_left->volume_remain, 7);
+    ck_assert_uint_eq(ctx.on_deal_calls, 1);
 
     om_engine_destroy(&engine);
 }
