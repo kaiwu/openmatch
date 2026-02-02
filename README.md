@@ -162,6 +162,56 @@ om_wal_close(&wal);
 6. **Config wiring** from `om_perf` into live components.
 7. **More validation** (parameter checks, error codes, and recovery guarantees).
 
+## Tools
+
+### wal_reader
+
+Reads a WAL file and prints one record per line.
+
+```
+./build/tools/wal_reader <wal_file>
+```
+
+Output format uses short bracketed fields (easy to parse):
+
+```
+seq[12] type[MATCH] len[40] m[100] t[200] p[10000] q[5] pid[0] ts[1700000000]
+```
+
+#### AWK examples
+
+Trace a single order id across all records:
+
+```
+./build/tools/wal_reader /tmp/openmatch.wal \
+  | awk -F'[][]' '{for (i=2;i<=NF;i+=2) if ($i=="oid" && $(i+1)==42) print $0}'
+```
+
+Extract all matches for a maker id (m[]):
+
+```
+./build/tools/wal_reader /tmp/openmatch.wal \
+  | awk -F'[][]' '{for (i=2;i<=NF;i+=2) if ($i=="m" && $(i+1)==42) print $0}'
+```
+
+Compute total traded quantity per maker id:
+
+```
+./build/tools/wal_reader /tmp/openmatch.wal \
+  | awk -F'[][]' '
+    {m=""; q=""; for (i=2;i<=NF;i+=2) {if ($i=="m") m=$(i+1); if ($i=="q") q=$(i+1)}
+     if (m!="" && q!="") sum[m]+=q}
+    END {for (id in sum) print id, sum[id]}
+  '
+```
+
+List all activates/deactivates:
+
+```
+./build/tools/wal_reader /tmp/openmatch.wal \
+  | awk -F'[][]' '{for (i=2;i<=NF;i+=2) if ($i=="type" && ($(i+1)=="DEACTIVATE" || $(i+1)=="ACTIVATE")) print $0}'
+```
+
 ## License
 
 MIT
