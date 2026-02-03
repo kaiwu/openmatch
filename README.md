@@ -265,6 +265,62 @@ List all activates/deactivates:
   | awk -F'[][]' '{for (i=2;i<=NF;i+=2) if ($i=="type" && ($(i+1)=="DEACTIVATE" || $(i+1)=="ACTIVATE")) print $0}'
 ```
 
+### wal_query (SQLite extension)
+
+Builds a loadable SQLite extension that exposes WAL records as a virtual table.
+
+```
+cmake -S . -B build
+cmake --build build
+```
+
+Load in sqlite3:
+
+```
+.load ./build/tools/wal_query
+CREATE VIRTUAL TABLE wal USING wal_query(
+  file=/tmp/openmatch.wal,
+  user_data=64,
+  aux_data=128,
+  crc32=1
+);
+SELECT seq, type_name, order_id, price, volume, product_id, timestamp_ns FROM wal;
+```
+
+Virtual table schema:
+
+```
+seq INTEGER
+type INTEGER
+type_name TEXT
+data_len INTEGER
+order_id INTEGER
+price INTEGER
+volume INTEGER
+vol_remain INTEGER
+org INTEGER
+flags INTEGER
+product_id INTEGER
+timestamp_ns INTEGER
+slot_idx INTEGER
+maker_id INTEGER
+taker_id INTEGER
+match_price INTEGER
+match_volume INTEGER
+user_type INTEGER
+```
+
+Multi-file WAL (pattern + index):
+
+```
+CREATE VIRTUAL TABLE wal USING wal_query(
+  pattern=/tmp/openmatch_%06u.wal,
+  index=0,
+  user_data=64,
+  aux_data=128
+);
+```
+
 ### wal_mock (compile-time)
 
 Build the library with WAL mock (prints to stderr, no file I/O):
