@@ -1,4 +1,8 @@
 #define _GNU_SOURCE  /* For O_DIRECT */
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#include <AvailabilityMacros.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -36,6 +40,11 @@ static inline uint64_t wal_get_timestamp_ns(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
         return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
     }
+#if defined(__APPLE__)
+    if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
+#endif
     return 0;
 }
 
@@ -169,9 +178,15 @@ static uint64_t wal_scan_for_last_sequence(const char *filename, const OmWalConf
 
 static int wal_open_file(OmWal *wal, const char *path) {
     int flags = O_WRONLY | O_CREAT | O_APPEND;
+#if defined(__APPLE__)
+    if (wal->config.use_direct_io) {
+        wal->config.use_direct_io = false;
+    }
+#else
     if (wal->config.use_direct_io) {
         flags |= O_DIRECT;
     }
+#endif
     wal->fd = open(path, flags, 0644);
     if (wal->fd < 0) {
         return -1;
