@@ -27,6 +27,86 @@ START_TEST(test_orderbook_init)
 }
 END_TEST
 
+START_TEST(test_orderbook_cancel_product_side)
+{
+    OmOrderbookContext ctx;
+    OmSlabConfig config = {
+        .user_data_size = 64,
+        .aux_data_size = 128,
+        .total_slots = 1000
+    };
+
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
+
+    OmSlabSlot *bid = om_slab_alloc(&ctx.slab);
+    ck_assert_ptr_nonnull(bid);
+    om_slot_set_order_id(bid, om_slab_next_order_id(&ctx.slab));
+    om_slot_set_price(bid, 10000);
+    om_slot_set_volume(bid, 10);
+    om_slot_set_volume_remain(bid, 10);
+    om_slot_set_flags(bid, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(bid, 1);
+
+    OmSlabSlot *ask = om_slab_alloc(&ctx.slab);
+    ck_assert_ptr_nonnull(ask);
+    om_slot_set_order_id(ask, om_slab_next_order_id(&ctx.slab));
+    om_slot_set_price(ask, 10100);
+    om_slot_set_volume(ask, 5);
+    om_slot_set_volume_remain(ask, 5);
+    om_slot_set_flags(ask, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    om_slot_set_org(ask, 1);
+
+    ck_assert_int_eq(om_orderbook_insert(&ctx, 0, bid), 0);
+    ck_assert_int_eq(om_orderbook_insert(&ctx, 0, ask), 0);
+
+    ck_assert_uint_eq(om_orderbook_cancel_product_side(&ctx, 0, true), 1);
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&ctx, bid->order_id));
+    ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&ctx, ask->order_id));
+
+    om_orderbook_destroy(&ctx);
+}
+END_TEST
+
+START_TEST(test_orderbook_cancel_product)
+{
+    OmOrderbookContext ctx;
+    OmSlabConfig config = {
+        .user_data_size = 64,
+        .aux_data_size = 128,
+        .total_slots = 1000
+    };
+
+    om_orderbook_init(&ctx, &config, NULL, 10, 100, 0);
+
+    OmSlabSlot *bid = om_slab_alloc(&ctx.slab);
+    ck_assert_ptr_nonnull(bid);
+    om_slot_set_order_id(bid, om_slab_next_order_id(&ctx.slab));
+    om_slot_set_price(bid, 10000);
+    om_slot_set_volume(bid, 10);
+    om_slot_set_volume_remain(bid, 10);
+    om_slot_set_flags(bid, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(bid, 1);
+
+    OmSlabSlot *ask = om_slab_alloc(&ctx.slab);
+    ck_assert_ptr_nonnull(ask);
+    om_slot_set_order_id(ask, om_slab_next_order_id(&ctx.slab));
+    om_slot_set_price(ask, 10100);
+    om_slot_set_volume(ask, 5);
+    om_slot_set_volume_remain(ask, 5);
+    om_slot_set_flags(ask, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    om_slot_set_org(ask, 1);
+
+    ck_assert_int_eq(om_orderbook_insert(&ctx, 0, bid), 0);
+    ck_assert_int_eq(om_orderbook_insert(&ctx, 0, ask), 0);
+
+    ck_assert_uint_eq(om_orderbook_cancel_product(&ctx, 0), 2);
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&ctx, bid->order_id));
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&ctx, ask->order_id));
+
+    om_orderbook_destroy(&ctx);
+}
+END_TEST
+
 /* Test inserting bid orders */
 START_TEST(test_orderbook_insert_bid)
 {
@@ -519,6 +599,8 @@ Suite *orderbook_suite(void)
     tcase_add_test(tc_core, test_orderbook_cancel_partial);
     tcase_add_test(tc_core, test_orderbook_cancel_best_price);
     tcase_add_test(tc_core, test_orderbook_cancel_head_same_price_tail);
+    tcase_add_test(tc_core, test_orderbook_cancel_product_side);
+    tcase_add_test(tc_core, test_orderbook_cancel_product);
     tcase_add_test(tc_core, test_orderbook_multiple_products);
     tcase_add_test(tc_core, test_orderbook_hashmap_lookup);
 

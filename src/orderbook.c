@@ -671,6 +671,54 @@ uint32_t om_orderbook_cancel_org_all(OmOrderbookContext *ctx, uint16_t org_id)
     return cancelled;
 }
 
+uint32_t om_orderbook_cancel_product_side(OmOrderbookContext *ctx, uint16_t product_id, bool is_bid)
+{
+    if (!ctx || product_id >= ctx->max_products) {
+        return 0;
+    }
+
+    uint32_t cancelled = 0;
+    uint32_t level_idx = is_bid ? ctx->products[product_id].bid_head_q1
+                                : ctx->products[product_id].ask_head_q1;
+
+    while (level_idx != OM_SLOT_IDX_NULL) {
+        OmSlabSlot *level = om_slot_from_idx(&ctx->slab, level_idx);
+        if (!level) {
+            break;
+        }
+        uint32_t next_level_idx = level->queue_nodes[OM_Q1_PRICE_LADDER].next_idx;
+
+        uint32_t order_idx = level_idx;
+        while (order_idx != OM_SLOT_IDX_NULL) {
+            OmSlabSlot *order = om_slot_from_idx(&ctx->slab, order_idx);
+            if (!order) {
+                break;
+            }
+            uint32_t next_order_idx = order->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
+            if (om_orderbook_cancel(ctx, order->order_id)) {
+                cancelled++;
+            }
+            order_idx = next_order_idx;
+        }
+
+        level_idx = next_level_idx;
+    }
+
+    return cancelled;
+}
+
+uint32_t om_orderbook_cancel_product(OmOrderbookContext *ctx, uint16_t product_id)
+{
+    if (!ctx || product_id >= ctx->max_products) {
+        return 0;
+    }
+
+    uint32_t cancelled = 0;
+    cancelled += om_orderbook_cancel_product_side(ctx, product_id, true);
+    cancelled += om_orderbook_cancel_product_side(ctx, product_id, false);
+    return cancelled;
+}
+
 bool om_orderbook_price_level_exists(const OmOrderbookContext *ctx,
                                       uint16_t product_id, uint64_t price,
                                       bool is_bid)

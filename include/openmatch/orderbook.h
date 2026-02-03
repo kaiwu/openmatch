@@ -181,6 +181,25 @@ uint32_t om_orderbook_cancel_org_product(OmOrderbookContext *ctx, uint16_t produ
 uint32_t om_orderbook_cancel_org_all(OmOrderbookContext *ctx, uint16_t org_id);
 
 /**
+ * Cancel all orders for a product on one side
+ *
+ * @param ctx Orderbook context
+ * @param product_id Product ID
+ * @param is_bid true for bid side, false for ask side
+ * @return Number of orders cancelled
+ */
+uint32_t om_orderbook_cancel_product_side(OmOrderbookContext *ctx, uint16_t product_id, bool is_bid);
+
+/**
+ * Cancel all orders for a product on both sides
+ *
+ * @param ctx Orderbook context
+ * @param product_id Product ID
+ * @return Number of orders cancelled
+ */
+uint32_t om_orderbook_cancel_product(OmOrderbookContext *ctx, uint16_t product_id);
+
+/**
  * Get best price level head slot for product side
  *
  * @param ctx Orderbook context

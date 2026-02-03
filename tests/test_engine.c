@@ -136,6 +136,82 @@ START_TEST(test_engine_init_callbacks)
 }
 END_TEST
 
+START_TEST(test_engine_cancel_product_side)
+{
+    OmEngine engine;
+    TestMatchCtx ctx = {0};
+    ctx.pre_booked_allow = true;
+    init_engine_with_ctx(&engine, &ctx);
+
+    OmSlabSlot *bid = om_slab_alloc(&engine.orderbook.slab);
+    OmSlabSlot *ask = om_slab_alloc(&engine.orderbook.slab);
+    ck_assert_ptr_nonnull(bid);
+    ck_assert_ptr_nonnull(ask);
+
+    om_slot_set_order_id(bid, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(bid, 10000);
+    om_slot_set_volume(bid, 10);
+    om_slot_set_volume_remain(bid, 10);
+    om_slot_set_flags(bid, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(bid, 1);
+
+    om_slot_set_order_id(ask, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(ask, 10100);
+    om_slot_set_volume(ask, 5);
+    om_slot_set_volume_remain(ask, 5);
+    om_slot_set_flags(ask, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    om_slot_set_org(ask, 1);
+
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, bid), 0);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, ask), 0);
+
+    ck_assert_uint_eq(om_engine_cancel_product_side(&engine, 0, true), 1);
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, bid->order_id));
+    ck_assert_ptr_nonnull(om_orderbook_get_slot_by_id(&engine.orderbook, ask->order_id));
+    ck_assert_uint_eq(ctx.on_cancel_calls, 1);
+
+    om_engine_destroy(&engine);
+}
+END_TEST
+
+START_TEST(test_engine_cancel_product)
+{
+    OmEngine engine;
+    TestMatchCtx ctx = {0};
+    ctx.pre_booked_allow = true;
+    init_engine_with_ctx(&engine, &ctx);
+
+    OmSlabSlot *bid = om_slab_alloc(&engine.orderbook.slab);
+    OmSlabSlot *ask = om_slab_alloc(&engine.orderbook.slab);
+    ck_assert_ptr_nonnull(bid);
+    ck_assert_ptr_nonnull(ask);
+
+    om_slot_set_order_id(bid, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(bid, 10000);
+    om_slot_set_volume(bid, 10);
+    om_slot_set_volume_remain(bid, 10);
+    om_slot_set_flags(bid, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(bid, 1);
+
+    om_slot_set_order_id(ask, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(ask, 10100);
+    om_slot_set_volume(ask, 5);
+    om_slot_set_volume_remain(ask, 5);
+    om_slot_set_flags(ask, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    om_slot_set_org(ask, 1);
+
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, bid), 0);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, ask), 0);
+
+    ck_assert_uint_eq(om_engine_cancel_product(&engine, 0), 2);
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, bid->order_id));
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, ask->order_id));
+    ck_assert_uint_eq(ctx.on_cancel_calls, 2);
+
+    om_engine_destroy(&engine);
+}
+END_TEST
+
 START_TEST(test_engine_callback_context)
 {
     OmEngine engine;
@@ -173,6 +249,24 @@ START_TEST(test_engine_match_pre_booked_cancel)
 
     ck_assert_int_eq(om_engine_match(&engine, 0, taker), 0);
     ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, taker->order_id));
+    ck_assert_uint_eq(ctx.on_cancel_calls, 1);
+
+    om_engine_destroy(&engine);
+}
+END_TEST
+
+START_TEST(test_engine_cancel_single)
+{
+    OmEngine engine;
+    TestMatchCtx ctx = {0};
+    ctx.pre_booked_allow = true;
+    init_engine_with_ctx(&engine, &ctx);
+
+    OmSlabSlot *order = make_order(&engine, 10000, 10, OM_SIDE_BID | OM_TYPE_LIMIT);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, order), 0);
+
+    ck_assert(om_engine_cancel(&engine, order->order_id));
+    ck_assert_ptr_null(om_orderbook_get_slot_by_id(&engine.orderbook, order->order_id));
     ck_assert_uint_eq(ctx.on_cancel_calls, 1);
 
     om_engine_destroy(&engine);
@@ -575,6 +669,7 @@ Suite *engine_suite(void)
     tcase_add_test(tc_core, test_engine_init_callbacks);
     tcase_add_test(tc_core, test_engine_callback_context);
     tcase_add_test(tc_core, test_engine_match_pre_booked_cancel);
+    tcase_add_test(tc_core, test_engine_cancel_single);
     tcase_add_test(tc_core, test_engine_match_full_fill_single);
     tcase_add_test(tc_core, test_engine_match_partial_fill_maker_remaining);
     tcase_add_test(tc_core, test_engine_match_partial_fill_taker_booked);
@@ -591,6 +686,8 @@ Suite *engine_suite(void)
     tcase_add_test(tc_core, test_engine_deactivate_activate);
     tcase_add_test(tc_core, test_engine_cancel_org_product);
     tcase_add_test(tc_core, test_engine_cancel_org_all);
+    tcase_add_test(tc_core, test_engine_cancel_product_side);
+    tcase_add_test(tc_core, test_engine_cancel_product);
 
     suite_add_tcase(s, tc_core);
     return s;

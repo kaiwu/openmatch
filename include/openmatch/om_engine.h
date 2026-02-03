@@ -288,6 +288,15 @@ static inline bool om_engine_has_pre_booked(const OmEngine *engine) {
 int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker);
 
 /**
+ * Cancel a single order by order ID
+ *
+ * @param engine Engine context
+ * @param order_id Order ID to cancel
+ * @return true if cancelled, false if not found
+ */
+bool om_engine_cancel(OmEngine *engine, uint32_t order_id);
+
+/**
  * Deactivate a resting order and remove it from the book without freeing it
  *
  * @param engine Engine context
@@ -323,5 +332,24 @@ uint32_t om_engine_cancel_org_product(OmEngine *engine, uint16_t product_id, uin
  * @return Number of orders cancelled
  */
 uint32_t om_engine_cancel_org_all(OmEngine *engine, uint16_t org_id);
+
+/**
+ * Cancel all orders for a product on one side
+ *
+ * @param engine Engine context
+ * @param product_id Product ID
+ * @param is_bid true for bid side, false for ask side
+ * @return Number of orders cancelled
+ */
+uint32_t om_engine_cancel_product_side(OmEngine *engine, uint16_t product_id, bool is_bid);
+
+/**
+ * Cancel all orders for a product on both sides
+ *
+ * @param engine Engine context
+ * @param product_id Product ID
+ * @return Number of orders cancelled
+ */
+uint32_t om_engine_cancel_product(OmEngine *engine, uint16_t product_id);
 
 #endif /* OM_ENGINE_H */
