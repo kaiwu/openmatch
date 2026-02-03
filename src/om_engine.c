@@ -3,6 +3,12 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(OM_ENABLE_PREFETCH) && (defined(__GNUC__) || defined(__clang__))
+#define OM_PREFETCH(ptr) __builtin_prefetch((ptr))
+#else
+#define OM_PREFETCH(ptr) ((void)0)
+#endif
+
 int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
 {
     if (!engine || !config) {
@@ -124,6 +130,7 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
     const uint64_t taker_price = taker->price;
 
     OmOrderbookContext *book = &engine->orderbook;
+    OmDualSlab *slab = &book->slab;
     OmEngineCallbacks *cb = &engine->callbacks;
     OmWal *wal = engine->wal;
     const bool has_can_match = cb->can_match != NULL;
@@ -143,10 +150,10 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
     }
 
     OmSlabSlot *level = om_orderbook_get_best_head(book, product_id, maker_is_bid);
-    uint32_t level_idx = level ? om_slot_get_idx(&book->slab, level) : OM_SLOT_IDX_NULL;
+    uint32_t level_idx = level ? om_slot_get_idx(slab, level) : OM_SLOT_IDX_NULL;
 
     while (taker_remaining > 0 && level_idx != OM_SLOT_IDX_NULL) {
-        level = om_slot_from_idx(&book->slab, level_idx);
+        level = om_slot_from_idx(slab, level_idx);
         if (!level) {
             break;
         }
@@ -164,15 +171,17 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
         }
 
         uint32_t next_level_idx = level->queue_nodes[OM_Q1_PRICE_LADDER].next_idx;
+        OM_PREFETCH(om_slot_from_idx(slab, next_level_idx));
         uint32_t maker_idx = level_idx;
 
         while (maker_idx != OM_SLOT_IDX_NULL && taker_remaining > 0) {
-            OmSlabSlot *maker = om_slot_from_idx(&book->slab, maker_idx);
+            OmSlabSlot *maker = om_slot_from_idx(slab, maker_idx);
             if (!maker) {
                 break;
             }
 
             uint32_t next_maker_idx = maker->queue_nodes[OM_Q2_TIME_FIFO].next_idx;
+            OM_PREFETCH(om_slot_from_idx(slab, next_maker_idx));
 
             uint64_t maker_remaining = maker->volume_remain;
             if (maker_remaining == 0) {

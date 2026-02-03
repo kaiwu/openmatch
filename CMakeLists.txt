@@ -10,6 +10,7 @@ option(USE_KHASHL "Use khashl hash map backend instead of khash" OFF)
 option(ENABLE_ASAN "Enable Address Sanitizer" ON)
 option(ENABLE_MSAN "Enable Memory Sanitizer (requires Clang)" OFF)
 option(ENABLE_UBSAN "Enable Undefined Behavior Sanitizer" ON)
+option(ENABLE_PREFETCH "Enable unconditional prefetch in hot path" OFF)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -37,6 +38,10 @@ endif()
 if(ENABLE_UBSAN)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=undefined -fno-omit-frame-pointer")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=undefined")
+endif()
+
+if(ENABLE_PREFETCH)
+    add_compile_definitions(OM_ENABLE_PREFETCH)
 endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
