@@ -5,8 +5,12 @@
 
 #if defined(OM_ENABLE_PREFETCH) && (defined(__GNUC__) || defined(__clang__))
 #define OM_PREFETCH(ptr) __builtin_prefetch((ptr))
+#define OM_LIKELY(x) __builtin_expect(!!(x), 1)
+#define OM_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
 #define OM_PREFETCH(ptr) ((void)0)
+#define OM_LIKELY(x) (x)
+#define OM_UNLIKELY(x) (x)
 #endif
 
 int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
@@ -116,12 +120,12 @@ void om_engine_destroy(OmEngine *engine)
 
 int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
 {
-    if (!engine || !taker) {
+    if (OM_UNLIKELY(!engine || !taker)) {
         return -1;
     }
 
     uint64_t taker_remaining = taker->volume_remain;
-    if (taker_remaining == 0) {
+    if (OM_UNLIKELY(taker_remaining == 0)) {
         return 0;
     }
 
@@ -152,20 +156,20 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
     OmSlabSlot *level = om_orderbook_get_best_head(book, product_id, maker_is_bid);
     uint32_t level_idx = level ? om_slot_get_idx(slab, level) : OM_SLOT_IDX_NULL;
 
-    while (taker_remaining > 0 && level_idx != OM_SLOT_IDX_NULL) {
+    while (OM_LIKELY(taker_remaining > 0 && level_idx != OM_SLOT_IDX_NULL)) {
         level = om_slot_from_idx(slab, level_idx);
-        if (!level) {
+        if (OM_UNLIKELY(!level)) {
             break;
         }
 
         uint64_t level_price = level->price;
 
         if (taker_is_bid) {
-            if (taker_price < level_price) {
+            if (OM_UNLIKELY(taker_price < level_price)) {
                 break;
             }
         } else {
-            if (taker_price > level_price) {
+            if (OM_UNLIKELY(taker_price > level_price)) {
                 break;
             }
         }
@@ -174,9 +178,9 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
         OM_PREFETCH(om_slot_from_idx(slab, next_level_idx));
         uint32_t maker_idx = level_idx;
 
-        while (maker_idx != OM_SLOT_IDX_NULL && taker_remaining > 0) {
+        while (OM_LIKELY(maker_idx != OM_SLOT_IDX_NULL && taker_remaining > 0)) {
             OmSlabSlot *maker = om_slot_from_idx(slab, maker_idx);
-            if (!maker) {
+            if (OM_UNLIKELY(!maker)) {
                 break;
             }
 
@@ -184,7 +188,7 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
             OM_PREFETCH(om_slot_from_idx(slab, next_maker_idx));
 
             uint64_t maker_remaining = maker->volume_remain;
-            if (maker_remaining == 0) {
+            if (OM_UNLIKELY(maker_remaining == 0)) {
                 om_orderbook_remove_slot(book, product_id, maker);
                 maker_idx = next_maker_idx;
                 continue;
@@ -197,7 +201,7 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
 
             if (has_can_match) {
                 uint64_t allowed = cb->can_match(maker, taker, cb->user_ctx);
-                if (allowed == 0) {
+                if (OM_UNLIKELY(allowed == 0)) {
                     maker_idx = next_maker_idx;
                     continue;
                 }
@@ -206,7 +210,7 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
                 }
             }
 
-            if (matchable == 0) {
+            if (OM_UNLIKELY(matchable == 0)) {
                 maker_idx = next_maker_idx;
                 continue;
             }
@@ -237,7 +241,7 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
                 om_wal_match(wal, &rec);
             }
 
-            if (maker->volume_remain == 0) {
+            if (OM_UNLIKELY(maker->volume_remain == 0)) {
                 if (has_on_filled) {
                     cb->on_filled(maker, cb->user_ctx);
                 }
@@ -246,21 +250,21 @@ int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
                 continue;
             }
 
-            if (taker_remaining == 0) {
+            if (OM_UNLIKELY(taker_remaining == 0)) {
                 break;
             }
 
             continue;
         }
 
-        if (taker_remaining == 0) {
+        if (OM_UNLIKELY(taker_remaining == 0)) {
             break;
         }
 
         level_idx = next_level_idx;
     }
 
-    if (taker_remaining == 0) {
+    if (OM_UNLIKELY(taker_remaining == 0)) {
         return 0;
     }
 
