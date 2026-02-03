@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include "openmatch/om_engine.h"
@@ -10,11 +11,20 @@
 #include "openmatch/om_wal.h"
 
 #define TEST_WAL_FILE "/tmp/test_orderbook.wal"
+#define TEST_WAL_PATTERN "/tmp/test_orderbook_%06u.wal"
 #define TEST_USER_DATA_SIZE 64
 #define TEST_AUX_DATA_SIZE 128
 
 static void cleanup_wal_file(void) {
     unlink(TEST_WAL_FILE);
+}
+
+static void cleanup_wal_pattern_files(void) {
+    for (int i = 0; i < 8; i++) {
+        char path[256];
+        snprintf(path, sizeof(path), TEST_WAL_PATTERN, i);
+        unlink(path);
+    }
 }
 
 START_TEST(test_wal_basic_write_recovery)
@@ -104,6 +114,70 @@ START_TEST(test_wal_basic_write_recovery)
 
     om_orderbook_destroy(&ctx2);
     cleanup_wal_file();
+}
+END_TEST
+
+START_TEST(test_wal_replay_multifile)
+{
+    cleanup_wal_pattern_files();
+
+    OmWalConfig wal_config = {
+        .filename = TEST_WAL_FILE,
+        .filename_pattern = TEST_WAL_PATTERN,
+        .file_index = 0,
+        .buffer_size = 4096,
+        .sync_interval_ms = 0,
+        .use_direct_io = false,
+        .enable_crc32 = false,
+        .user_data_size = 0,
+        .aux_data_size = 0,
+        .wal_max_file_size = 200
+    };
+
+    OmWal wal;
+    ck_assert_int_eq(om_wal_init(&wal, &wal_config), 0);
+
+    for (int i = 0; i < 3; i++) {
+        OmWalMatch match = {
+            .maker_id = 100 + (uint64_t)i,
+            .taker_id = 200 + (uint64_t)i,
+            .price = 10000 + (uint64_t)i,
+            .volume = 1,
+            .timestamp_ns = 1000 + (uint64_t)i,
+            .product_id = (uint16_t)i
+        };
+        ck_assert_uint_ne(om_wal_match(&wal, &match), 0);
+        ck_assert_int_eq(om_wal_flush(&wal), 0);
+    }
+
+    om_wal_close(&wal);
+
+    OmWalReplay replay;
+    ck_assert_int_eq(om_wal_replay_init_with_config(&replay, TEST_WAL_FILE, &wal_config), 0);
+
+    OmWalType type;
+    void *data;
+    uint64_t sequence;
+    size_t data_len;
+    uint64_t makers[3];
+    size_t count = 0;
+
+    while (om_wal_replay_next(&replay, &type, &data, &sequence, &data_len) == 1) {
+        ck_assert_int_eq(type, OM_WAL_MATCH);
+        ck_assert_uint_eq(data_len, sizeof(OmWalMatch));
+        ck_assert_int_lt(count, 3);
+        OmWalMatch *rec = (OmWalMatch *)data;
+        makers[count] = rec->maker_id;
+        count++;
+    }
+
+    ck_assert_uint_eq(count, 3);
+    ck_assert_uint_eq(makers[0], 100);
+    ck_assert_uint_eq(makers[1], 101);
+    ck_assert_uint_eq(makers[2], 102);
+
+    om_wal_replay_close(&replay);
+    cleanup_wal_pattern_files();
 }
 END_TEST
 
@@ -744,6 +818,7 @@ Suite *wal_suite(void)
     tcase_add_test(tc_core, test_wal_match_recovery_from_engine);
     tcase_add_test(tc_core, test_wal_deactivate_activate_recovery);
     tcase_add_test(tc_core, test_wal_custom_record_replay);
+    tcase_add_test(tc_core, test_wal_replay_multifile);
 
     suite_add_tcase(s, tc_core);
     return s;

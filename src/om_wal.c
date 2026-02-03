@@ -167,6 +167,27 @@ static uint64_t wal_scan_for_last_sequence(const char *filename, const OmWalConf
     return last_seq;
 }
 
+static int wal_open_file(OmWal *wal, const char *path) {
+    int flags = O_WRONLY | O_CREAT | O_APPEND;
+    if (wal->config.use_direct_io) {
+        flags |= O_DIRECT;
+    }
+    wal->fd = open(path, flags, 0644);
+    if (wal->fd < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int wal_open_indexed(OmWal *wal, uint32_t index) {
+    if (!wal->config.filename_pattern) {
+        return -1;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), wal->config.filename_pattern, index);
+    return wal_open_file(wal, path);
+}
+
 int om_wal_init(OmWal *wal, const OmWalConfig *config) {
     if (!wal || !config || !config->filename) {
         return -1;
@@ -189,15 +210,17 @@ int om_wal_init(OmWal *wal, const OmWalConfig *config) {
     wal->buffer_size = wal->config.buffer_size;
     wal->buffer_used = 0;
 
-    int flags = O_WRONLY | O_CREAT | O_APPEND;
-    if (wal->config.use_direct_io) {
-        flags |= O_DIRECT;
-    }
-
-    wal->fd = open(config->filename, flags, 0644);
-    if (wal->fd < 0) {
-        free(wal->buffer_unaligned);
-        return -1;
+    wal->file_index = wal->config.file_index;
+    if (wal->config.filename_pattern) {
+        if (wal_open_indexed(wal, wal->file_index) != 0) {
+            free(wal->buffer_unaligned);
+            return -1;
+        }
+    } else {
+        if (wal_open_file(wal, config->filename) != 0) {
+            free(wal->buffer_unaligned);
+            return -1;
+        }
     }
 
     struct stat st;
@@ -407,6 +430,18 @@ int om_wal_flush(OmWal *wal) {
                write_size - wal->buffer_used);
     }
 
+    /* Expand to next WAL file if needed */
+    if (wal->config.filename_pattern && wal->config.wal_max_file_size > 0) {
+        if (wal->file_offset + write_size > wal->config.wal_max_file_size) {
+            close(wal->fd);
+            wal->file_index++;
+            if (wal_open_indexed(wal, wal->file_index) != 0) {
+                return -1;
+            }
+            wal->file_offset = 0;
+        }
+    }
+
     /* Write to file */
     ssize_t written = write(wal->fd, wal->buffer, write_size);
     if (written != (ssize_t)write_size) {
@@ -440,6 +475,29 @@ int om_wal_fsync(OmWal *wal) {
 
 #define REPLAY_BUFFER_SIZE (1024 * 1024)  /* 1MB read buffer */
 #define REPLAY_ALIGN 4096
+
+static int wal_replay_open_indexed(OmWalReplay *replay, const char *pattern, uint32_t index) {
+    if (!pattern) {
+        return -1;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), pattern, index);
+    replay->fd = open(path, O_RDONLY);
+    if (replay->fd < 0) {
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(replay->fd, &st) != 0) {
+        close(replay->fd);
+        replay->fd = -1;
+        return -1;
+    }
+    replay->file_size = st.st_size;
+    replay->file_offset = 0;
+    replay->file_index = index;
+    return 0;
+}
 
 int om_wal_replay_init(OmWalReplay *replay, const char *filename) {
     if (!replay || !filename) {
@@ -477,6 +535,7 @@ int om_wal_replay_init(OmWalReplay *replay, const char *filename) {
     replay->file_offset = 0;
     replay->last_sequence = 0;
     replay->eof = false;
+    replay->filename_pattern = NULL;
 
     return 0;
 }
@@ -496,13 +555,40 @@ int om_wal_replay_init_with_config(OmWalReplay *replay, const char *filename,
     if (!config) {
         return -1;
     }
-    int ret = om_wal_replay_init(replay, filename);
-    if (ret == 0) {
-        replay->user_data_size = config->user_data_size;
-        replay->aux_data_size = config->aux_data_size;
-        replay->enable_crc32 = config->enable_crc32;
+    int ret = 0;
+    if (config->filename_pattern) {
+        memset(replay, 0, sizeof(OmWalReplay));
+        replay->file_index = config->file_index;
+        ret = wal_replay_open_indexed(replay, config->filename_pattern, replay->file_index);
+        if (ret != 0) {
+            return -1;
+        }
+
+        replay->buffer_unaligned = malloc(REPLAY_BUFFER_SIZE + REPLAY_ALIGN);
+        if (!replay->buffer_unaligned) {
+            close(replay->fd);
+            replay->fd = -1;
+            return -1;
+        }
+        replay->buffer = align_up(replay->buffer_unaligned, REPLAY_ALIGN);
+        replay->buffer_size = REPLAY_BUFFER_SIZE;
+        replay->buffer_valid = 0;
+        replay->buffer_pos = 0;
+        replay->last_sequence = 0;
+        replay->eof = false;
+        replay->filename_pattern = config->filename_pattern;
+    } else {
+        ret = om_wal_replay_init(replay, filename);
+        if (ret != 0) {
+            return ret;
+        }
+        replay->filename_pattern = NULL;
     }
-    return ret;
+
+    replay->user_data_size = config->user_data_size;
+    replay->aux_data_size = config->aux_data_size;
+    replay->enable_crc32 = config->enable_crc32;
+    return 0;
 }
 
 void om_wal_replay_set_user_handler(OmWalReplay *replay,
@@ -533,10 +619,21 @@ void om_wal_replay_close(OmWalReplay *replay) {
     replay->buffer_pos = 0;
 }
 
+static int replay_advance_file(OmWalReplay *replay);
+
 /* Fill buffer from file */
 static int replay_fill_buffer(OmWalReplay *replay) {
-    if (replay->eof || replay->file_offset >= replay->file_size) {
-        return 0;
+    while (replay->eof || replay->file_offset >= replay->file_size) {
+        if (!replay->filename_pattern) {
+            return 0;
+        }
+        int ret = replay_advance_file(replay);
+        if (ret < 0) {
+            return -1;
+        }
+        if (ret == 0) {
+            return 0;
+        }
     }
 
     /* Move remaining data to beginning of buffer */
@@ -560,13 +657,33 @@ static int replay_fill_buffer(OmWalReplay *replay) {
     }
     if (n == 0) {
         replay->eof = true;
-        return 0;
+        return replay_fill_buffer(replay);
     }
 
     replay->buffer_valid = remaining + n;
     replay->buffer_pos = 0;
     replay->file_offset += n;
 
+    return 1;
+}
+
+static int replay_advance_file(OmWalReplay *replay) {
+    if (!replay || replay->fd < 0) {
+        return -1;
+    }
+    if (!replay->filename_pattern) {
+        return -1;
+    }
+    close(replay->fd);
+    replay->fd = -1;
+    replay->file_index++;
+    if (wal_replay_open_indexed(replay, replay->filename_pattern, replay->file_index) != 0) {
+        replay->eof = true;
+        return 0;
+    }
+    replay->buffer_valid = 0;
+    replay->buffer_pos = 0;
+    replay->eof = false;
     return 1;
 }
 
@@ -578,35 +695,42 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
 
     size_t crc_size = replay->enable_crc32 ? WAL_CRC32_SIZE : 0;
 
-    if (replay->buffer_pos + sizeof(OmWalHeader) > replay->buffer_valid) {
-        int ret = replay_fill_buffer(replay);
-        if (ret < 0) return -1;
-        if (ret == 0) return 0;
-        
+    while (1) {
         if (replay->buffer_pos + sizeof(OmWalHeader) > replay->buffer_valid) {
-            return 0;
+            int ret = replay_fill_buffer(replay);
+            if (ret < 0) return -1;
+            if (ret == 0) return 0;
+            if (replay->buffer_pos + sizeof(OmWalHeader) > replay->buffer_valid) {
+                return 0;
+            }
         }
-    }
 
-    char *record_start = (char *)replay->buffer + replay->buffer_pos;
-    
-    /* Use memcpy to avoid unaligned access (UBSan) */
-    OmWalHeader header_local;
-    memcpy(&header_local, record_start, sizeof(OmWalHeader));
-    uint64_t packed = header_local.seq_type_len;
-    *sequence = om_wal_header_seq(packed);
-    uint8_t type_byte = om_wal_header_type(packed);
-    uint16_t payload_len = om_wal_header_len(packed);
-    
-    /* Treat invalid type as EOF (handles zero padding at file end) */
-    if (type_byte < OM_WAL_INSERT || (type_byte > OM_WAL_ACTIVATE && type_byte < OM_WAL_USER_BASE)) {
-        return 0;  /* EOF - not a valid record */
-    }
-    *type = (OmWalType)type_byte;
+        char *record_start = (char *)replay->buffer + replay->buffer_pos;
 
-    replay->buffer_pos += sizeof(OmWalHeader);
+        /* Use memcpy to avoid unaligned access (UBSan) */
+        OmWalHeader header_local;
+        memcpy(&header_local, record_start, sizeof(OmWalHeader));
+        uint64_t packed = header_local.seq_type_len;
+        *sequence = om_wal_header_seq(packed);
+        uint8_t type_byte = om_wal_header_type(packed);
+        uint16_t payload_len = om_wal_header_len(packed);
 
-    if (*type == OM_WAL_INSERT) {
+        /* Treat invalid type as EOF (handles zero padding at file end) */
+        if (type_byte < OM_WAL_INSERT || (type_byte > OM_WAL_ACTIVATE && type_byte < OM_WAL_USER_BASE)) {
+            if (replay->filename_pattern) {
+                replay->buffer_pos = replay->buffer_valid;
+                int ret = replay_fill_buffer(replay);
+                if (ret < 0) return -1;
+                if (ret == 0) return 0;
+                continue;
+            }
+            return 0;  /* EOF - not a valid record */
+        }
+        *type = (OmWalType)type_byte;
+
+        replay->buffer_pos += sizeof(OmWalHeader);
+
+        if (*type == OM_WAL_INSERT) {
         if (replay->buffer_pos + sizeof(OmWalInsert) > replay->buffer_valid) {
             int ret = replay_fill_buffer(replay);
             if (ret < 0) return -1;
@@ -645,8 +769,8 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
         replay->buffer_pos += *data_len + crc_size;
         replay->last_sequence = *sequence;
 
-        return 1;
-    } else {
+            return 1;
+        } else {
         *data_len = payload_len;
 
         size_t needed = *data_len + crc_size;
@@ -679,7 +803,8 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
             }
         }
 
-        return 1;
+            return 1;
+        }
     }
 }
 

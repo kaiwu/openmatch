@@ -129,6 +129,12 @@ Custom record output:
 - `wal_reader` prints `user[len]` for custom records
 - `wal_mock` prints `type[USER] ut[<type>] len[<len>]`
 
+Multi-file WAL:
+
+- Set `OmWalConfig.filename_pattern` (e.g. `/tmp/openmatch_%06u.wal`) with `file_index` start
+- Set `wal_max_file_size` to roll to the next file on flush
+- Replay will scan sequential files in increasing index until a file is missing
+
 ### Performance Presets (`om_perf`)
 
 Presets include `OM_PERF_DEFAULT`, `OM_PERF_HFT`, `OM_PERF_DURABLE`,

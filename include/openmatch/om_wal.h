@@ -103,6 +103,8 @@ typedef struct OmWalMatch {
 /* WAL configuration - now includes data sizes for variable-length records */
 typedef struct OmWalConfig {
     const char *filename;       /* WAL file path */
+    const char *filename_pattern; /* Optional pattern for multi-file WAL ("/path/wal_%06u.log") */
+    uint32_t file_index;         /* Starting file index for multi-file WAL */
     size_t buffer_size;         /* Write buffer size (default 1MB) */
     uint32_t sync_interval_ms;  /* Fsync interval in ms (default 10) */
     bool use_direct_io;         /* Use O_DIRECT (default true) */
@@ -111,6 +113,8 @@ typedef struct OmWalConfig {
     /* Data sizes - must match slab configuration */
     size_t user_data_size;      /* Size of secondary hot data (from OmSlabConfig.user_data_size) */
     size_t aux_data_size;       /* Size of cold data (from OmSlabConfig.aux_data_size) */
+
+    uint64_t wal_max_file_size; /* Max WAL size before next file (0 = unlimited) */
 } OmWalConfig;
 
 /* Forward declaration for slab */
@@ -125,6 +129,7 @@ typedef struct OmWal {
     size_t buffer_used;         /* Bytes used in current buffer */
     uint64_t sequence;          /* Next sequence number */
     uint64_t file_offset;       /* Current file offset */
+    uint32_t file_index;         /* Current WAL file index */
     OmWalConfig config;         /* Configuration copy with data sizes */
     struct OmDualSlab *slab;    /* Slab pointer for aux data access (can be NULL) */
 } OmWal;
@@ -207,8 +212,10 @@ typedef struct OmWalReplay {
     size_t buffer_pos;          /* Current read position in buffer */
     uint64_t file_offset;       /* Current offset in file */
     uint64_t file_size;         /* Total file size */
+    uint32_t file_index;         /* Current WAL file index */
     uint64_t last_sequence;     /* Last sequence number read */
     bool eof;                   /* End of file reached */
+    const char *filename_pattern; /* Optional pattern for multi-file replay */
     
     /* Data sizes from WAL config - needed for parsing insert records */
     size_t user_data_size;
