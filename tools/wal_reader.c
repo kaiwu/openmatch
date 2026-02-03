@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <string.h>
+#include <stdbool.h>
+#include <time.h>
 #include "openmatch/om_wal.h"
 
 static const char *wal_type_name(OmWalType type) {
@@ -15,44 +18,130 @@ static const char *wal_type_name(OmWalType type) {
     }
 }
 
-static void print_insert(const OmWalInsert *rec) {
-    printf("oid[%" PRIu64 "] p[%" PRIu64 "] v[%" PRIu64 "] vr[%" PRIu64 "] org[%" PRIu16 "] "
-           "f[0x%04" PRIx16 "] pid[%" PRIu16 "] ud[%" PRIu32 "] ad[%" PRIu32 "] ts[%" PRIu64 "]",
+static void format_timestamp(uint64_t timestamp_ns, char *buf, size_t buf_len) {
+    time_t secs = (time_t)(timestamp_ns / 1000000000ULL);
+    long nsec = (long)(timestamp_ns % 1000000000ULL);
+    struct tm tm_val;
+    if (localtime_r(&secs, &tm_val) == NULL) {
+        snprintf(buf, buf_len, "0");
+        return;
+    }
+    int len = strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", &tm_val);
+    if (len <= 0 || (size_t)len >= buf_len) {
+        snprintf(buf, buf_len, "0");
+        return;
+    }
+    snprintf(buf + len, buf_len - (size_t)len, ".%06ld", nsec / 1000L);
+}
+
+static void print_insert(const OmWalInsert *rec, bool format_ts) {
+    char ts_buf[64];
+    const char *ts_str = NULL;
+    if (format_ts) {
+        format_timestamp(rec->timestamp_ns, ts_buf, sizeof(ts_buf));
+        ts_str = ts_buf;
+    }
+    printf("ts[");
+    if (format_ts) {
+        printf("%s", ts_str);
+    } else {
+        printf("%" PRIu64, rec->timestamp_ns);
+    }
+    printf("] oid[%" PRIu64 "] p[%" PRIu64 "] v[%" PRIu64 "] vr[%" PRIu64 "] org[%" PRIu16 "] "
+           "f[0x%04" PRIx16 "] pid[%" PRIu16 "] ud[%" PRIu32 "] ad[%" PRIu32 "]",
            rec->order_id, rec->price, rec->volume, rec->vol_remain,
            rec->org, rec->flags, rec->product_id,
-           rec->user_data_size, rec->aux_data_size, rec->timestamp_ns);
+           rec->user_data_size, rec->aux_data_size);
 }
 
-static void print_cancel(const OmWalCancel *rec) {
-    printf("oid[%" PRIu64 "] s[%" PRIu32 "] pid[%" PRIu16 "] ts[%" PRIu64 "]",
-           rec->order_id, rec->slot_idx, rec->product_id, rec->timestamp_ns);
+static void print_cancel(const OmWalCancel *rec, bool format_ts) {
+    char ts_buf[64];
+    const char *ts_str = NULL;
+    if (format_ts) {
+        format_timestamp(rec->timestamp_ns, ts_buf, sizeof(ts_buf));
+        ts_str = ts_buf;
+    }
+    printf("ts[");
+    if (format_ts) {
+        printf("%s", ts_str);
+    } else {
+        printf("%" PRIu64, rec->timestamp_ns);
+    }
+    printf("] oid[%" PRIu64 "] s[%" PRIu32 "] pid[%" PRIu16 "]",
+           rec->order_id, rec->slot_idx, rec->product_id);
 }
 
-static void print_match(const OmWalMatch *rec) {
-    printf("m[%" PRIu64 "] t[%" PRIu64 "] p[%" PRIu64 "] q[%" PRIu64 "] pid[%" PRIu16 "] ts[%" PRIu64 "]",
+static void print_match(const OmWalMatch *rec, bool format_ts) {
+    char ts_buf[64];
+    const char *ts_str = NULL;
+    if (format_ts) {
+        format_timestamp(rec->timestamp_ns, ts_buf, sizeof(ts_buf));
+        ts_str = ts_buf;
+    }
+    printf("ts[");
+    if (format_ts) {
+        printf("%s", ts_str);
+    } else {
+        printf("%" PRIu64, rec->timestamp_ns);
+    }
+    printf("] m[%" PRIu64 "] t[%" PRIu64 "] p[%" PRIu64 "] q[%" PRIu64 "] pid[%" PRIu16 "]",
            rec->maker_id, rec->taker_id, rec->price, rec->volume,
-           rec->product_id, rec->timestamp_ns);
+           rec->product_id);
 }
 
-static void print_deactivate(const OmWalDeactivate *rec) {
-    printf("oid[%" PRIu64 "] s[%" PRIu32 "] pid[%" PRIu16 "] ts[%" PRIu64 "]",
-           rec->order_id, rec->slot_idx, rec->product_id, rec->timestamp_ns);
+static void print_deactivate(const OmWalDeactivate *rec, bool format_ts) {
+    char ts_buf[64];
+    const char *ts_str = NULL;
+    if (format_ts) {
+        format_timestamp(rec->timestamp_ns, ts_buf, sizeof(ts_buf));
+        ts_str = ts_buf;
+    }
+    printf("ts[");
+    if (format_ts) {
+        printf("%s", ts_str);
+    } else {
+        printf("%" PRIu64, rec->timestamp_ns);
+    }
+    printf("] oid[%" PRIu64 "] s[%" PRIu32 "] pid[%" PRIu16 "]",
+           rec->order_id, rec->slot_idx, rec->product_id);
 }
 
-static void print_activate(const OmWalActivate *rec) {
-    printf("oid[%" PRIu64 "] s[%" PRIu32 "] pid[%" PRIu16 "] ts[%" PRIu64 "]",
-           rec->order_id, rec->slot_idx, rec->product_id, rec->timestamp_ns);
+static void print_activate(const OmWalActivate *rec, bool format_ts) {
+    char ts_buf[64];
+    const char *ts_str = NULL;
+    if (format_ts) {
+        format_timestamp(rec->timestamp_ns, ts_buf, sizeof(ts_buf));
+        ts_str = ts_buf;
+    }
+    printf("ts[");
+    if (format_ts) {
+        printf("%s", ts_str);
+    } else {
+        printf("%" PRIu64, rec->timestamp_ns);
+    }
+    printf("] oid[%" PRIu64 "] s[%" PRIu32 "] pid[%" PRIu16 "]",
+           rec->order_id, rec->slot_idx, rec->product_id);
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <wal_file>\n", argv[0]);
+    bool format_ts = false;
+    const char *wal_path = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-t") == 0) {
+            format_ts = true;
+            continue;
+        }
+        wal_path = argv[i];
+    }
+
+    if (!wal_path) {
+        fprintf(stderr, "usage: %s [-t] <wal_file>\n", argv[0]);
         return 2;
     }
 
     OmWalReplay replay;
-    if (om_wal_replay_init(&replay, argv[1]) != 0) {
-        fprintf(stderr, "failed to open wal: %s\n", argv[1]);
+    if (om_wal_replay_init(&replay, wal_path) != 0) {
+        fprintf(stderr, "failed to open wal: %s\n", wal_path);
         return 1;
     }
 
@@ -76,27 +165,27 @@ int main(int argc, char **argv) {
         switch (type) {
             case OM_WAL_INSERT:
                 if (data_len >= sizeof(OmWalInsert)) {
-                    print_insert((const OmWalInsert *)data);
+                    print_insert((const OmWalInsert *)data, format_ts);
                 }
                 break;
             case OM_WAL_CANCEL:
                 if (data_len == sizeof(OmWalCancel)) {
-                    print_cancel((const OmWalCancel *)data);
+                    print_cancel((const OmWalCancel *)data, format_ts);
                 }
                 break;
             case OM_WAL_MATCH:
                 if (data_len == sizeof(OmWalMatch)) {
-                    print_match((const OmWalMatch *)data);
+                    print_match((const OmWalMatch *)data, format_ts);
                 }
                 break;
             case OM_WAL_DEACTIVATE:
                 if (data_len == sizeof(OmWalDeactivate)) {
-                    print_deactivate((const OmWalDeactivate *)data);
+                    print_deactivate((const OmWalDeactivate *)data, format_ts);
                 }
                 break;
             case OM_WAL_ACTIVATE:
                 if (data_len == sizeof(OmWalActivate)) {
-                    print_activate((const OmWalActivate *)data);
+                    print_activate((const OmWalActivate *)data, format_ts);
                 }
                 break;
             default:

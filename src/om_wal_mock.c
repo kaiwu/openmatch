@@ -11,6 +11,30 @@ static uint64_t wal_mock_now_ns(void) {
     return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
 }
 
+static void wal_mock_format_timestamp(uint64_t timestamp_ns, char *buf, size_t buf_len) {
+    time_t secs = (time_t)(timestamp_ns / 1000000000ULL);
+    long nsec = (long)(timestamp_ns % 1000000000ULL);
+    struct tm tm_val;
+    if (localtime_r(&secs, &tm_val) == NULL) {
+        snprintf(buf, buf_len, "0");
+        return;
+    }
+    int len = strftime(buf, buf_len, "%Y-%m-%d %H:%M:%S", &tm_val);
+    if (len <= 0 || (size_t)len >= buf_len) {
+        snprintf(buf, buf_len, "0");
+        return;
+    }
+    snprintf(buf + len, buf_len - (size_t)len, ".%06ld", nsec / 1000L);
+}
+
+static void wal_mock_timestamp_string(uint64_t timestamp_ns, bool show, char *buf, size_t buf_len) {
+    if (!show) {
+        snprintf(buf, buf_len, "0");
+        return;
+    }
+    wal_mock_format_timestamp(timestamp_ns, buf, buf_len);
+}
+
 int om_wal_mock_init(OmWal *wal, const OmWalConfig *config) {
     if (!wal) {
         return -1;
@@ -43,12 +67,15 @@ uint64_t om_wal_mock_insert(OmWal *wal, struct OmSlabSlot *slot, uint16_t produc
     wal->sequence++;
     wal->inserts_logged++;
     if (wal->enabled) {
-        uint64_t ts = wal->show_timestamp ? wal_mock_now_ns() : 0;
-        fprintf(stderr, "seq[%" PRIu64 "] type[INSERT] oid[%" PRIu32 "] p[%" PRIu64 "] v[%" PRIu64
-                        "] vr[%" PRIu64 "] org[%" PRIu16 "] f[0x%04" PRIx16 "] pid[%" PRIu16
-                        "] ts[%" PRIu64 "]\n",
+        char ts_buf[64];
+        uint64_t ts = wal_mock_now_ns();
+        wal_mock_timestamp_string(ts, wal->show_timestamp, ts_buf, sizeof(ts_buf));
+        fprintf(stderr, "ts[%s] seq[%" PRIu64 "] type[INSERT] oid[%" PRIu32 "] p[%" PRIu64
+                        "] v[%" PRIu64 "] vr[%" PRIu64 "] org[%" PRIu16 "] f[0x%04" PRIx16
+                        "] pid[%" PRIu16 "]\n",
+                ts_buf,
                 wal->sequence, slot->order_id, slot->price, slot->volume,
-                slot->volume_remain, slot->org, slot->flags, product_id, ts);
+                slot->volume_remain, slot->org, slot->flags, product_id);
     }
     return wal->sequence;
 }
@@ -60,10 +87,12 @@ uint64_t om_wal_mock_cancel(OmWal *wal, uint32_t order_id, uint32_t slot_idx, ui
     wal->sequence++;
     wal->cancels_logged++;
     if (wal->enabled) {
-        uint64_t ts = wal->show_timestamp ? wal_mock_now_ns() : 0;
-        fprintf(stderr, "seq[%" PRIu64 "] type[CANCEL] oid[%" PRIu32 "] s[%" PRIu32
-                        "] pid[%" PRIu16 "] ts[%" PRIu64 "]\n",
-                wal->sequence, order_id, slot_idx, product_id, ts);
+        char ts_buf[64];
+        uint64_t ts = wal_mock_now_ns();
+        wal_mock_timestamp_string(ts, wal->show_timestamp, ts_buf, sizeof(ts_buf));
+        fprintf(stderr, "ts[%s] seq[%" PRIu64 "] type[CANCEL] oid[%" PRIu32 "] s[%" PRIu32
+                        "] pid[%" PRIu16 "]\n",
+                ts_buf, wal->sequence, order_id, slot_idx, product_id);
     }
     return wal->sequence;
 }
@@ -75,10 +104,12 @@ uint64_t om_wal_mock_match(OmWal *wal, const OmWalMatch *rec) {
     wal->sequence++;
     wal->matches_logged++;
     if (wal->enabled) {
-        fprintf(stderr, "seq[%" PRIu64 "] type[MATCH] m[%" PRIu64 "] t[%" PRIu64
-                        "] p[%" PRIu64 "] q[%" PRIu64 "] pid[%" PRIu16 "] ts[%" PRIu64 "]\n",
-                wal->sequence, rec->maker_id, rec->taker_id, rec->price, rec->volume,
-                rec->product_id, rec->timestamp_ns);
+        char ts_buf[64];
+        wal_mock_timestamp_string(rec->timestamp_ns, wal->show_timestamp, ts_buf, sizeof(ts_buf));
+        fprintf(stderr, "ts[%s] seq[%" PRIu64 "] type[MATCH] m[%" PRIu64 "] t[%" PRIu64
+                        "] p[%" PRIu64 "] q[%" PRIu64 "] pid[%" PRIu16 "]\n",
+                ts_buf, wal->sequence, rec->maker_id, rec->taker_id, rec->price,
+                rec->volume, rec->product_id);
     }
     return wal->sequence;
 }
@@ -90,10 +121,12 @@ uint64_t om_wal_mock_deactivate(OmWal *wal, uint32_t order_id, uint32_t slot_idx
     wal->sequence++;
     wal->deactivates_logged++;
     if (wal->enabled) {
-        uint64_t ts = wal->show_timestamp ? wal_mock_now_ns() : 0;
-        fprintf(stderr, "seq[%" PRIu64 "] type[DEACTIVATE] oid[%" PRIu32 "] s[%" PRIu32
-                        "] pid[%" PRIu16 "] ts[%" PRIu64 "]\n",
-                wal->sequence, order_id, slot_idx, product_id, ts);
+        char ts_buf[64];
+        uint64_t ts = wal_mock_now_ns();
+        wal_mock_timestamp_string(ts, wal->show_timestamp, ts_buf, sizeof(ts_buf));
+        fprintf(stderr, "ts[%s] seq[%" PRIu64 "] type[DEACTIVATE] oid[%" PRIu32 "] s[%" PRIu32
+                        "] pid[%" PRIu16 "]\n",
+                ts_buf, wal->sequence, order_id, slot_idx, product_id);
     }
     return wal->sequence;
 }
@@ -105,10 +138,12 @@ uint64_t om_wal_mock_activate(OmWal *wal, uint32_t order_id, uint32_t slot_idx, 
     wal->sequence++;
     wal->activates_logged++;
     if (wal->enabled) {
-        uint64_t ts = wal->show_timestamp ? wal_mock_now_ns() : 0;
-        fprintf(stderr, "seq[%" PRIu64 "] type[ACTIVATE] oid[%" PRIu32 "] s[%" PRIu32
-                        "] pid[%" PRIu16 "] ts[%" PRIu64 "]\n",
-                wal->sequence, order_id, slot_idx, product_id, ts);
+        char ts_buf[64];
+        uint64_t ts = wal_mock_now_ns();
+        wal_mock_timestamp_string(ts, wal->show_timestamp, ts_buf, sizeof(ts_buf));
+        fprintf(stderr, "ts[%s] seq[%" PRIu64 "] type[ACTIVATE] oid[%" PRIu32 "] s[%" PRIu32
+                        "] pid[%" PRIu16 "]\n",
+                ts_buf, wal->sequence, order_id, slot_idx, product_id);
     }
     return wal->sequence;
 }
