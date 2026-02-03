@@ -278,13 +278,13 @@ Load in sqlite3:
 
 ```
 .load ./build/tools/wal_query
-CREATE VIRTUAL TABLE wal USING wal_query(
+CREATE VIRTUAL TABLE walv USING wal_query(
   file=/tmp/openmatch.wal,
   user_data=64,
   aux_data=128,
   crc32=1
 );
-SELECT seq, type_name, order_id, price, volume, product_id, timestamp_ns FROM wal;
+SELECT seq, type_name, order_id, price, volume, product_id, timestamp_ns FROM walv;
 ```
 
 Virtual table schema:
@@ -313,7 +313,7 @@ user_type INTEGER
 Multi-file WAL (pattern + index):
 
 ```
-CREATE VIRTUAL TABLE wal USING wal_query(
+CREATE VIRTUAL TABLE walv USING wal_query(
   pattern=/tmp/openmatch_%06u.wal,
   index=0,
   user_data=64,
@@ -326,6 +326,8 @@ Optional indexes (load in sqlite3):
 ```
 .read ./tools/wal_query.sql
 ```
+
+This materializes the virtual table into `wal` and creates indexes there.
 
 ### wal_mock (compile-time)
 

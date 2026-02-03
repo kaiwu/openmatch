@@ -1,5 +1,8 @@
--- SQLite helper to add indexes for wal_query virtual table.
--- Assumes a virtual table named "wal" already exists.
+-- SQLite helper to materialize wal_query and add indexes.
+-- Assumes a virtual table named "walv" already exists.
+
+DROP TABLE IF EXISTS wal;
+CREATE TABLE wal AS SELECT * FROM walv;
 
 CREATE INDEX IF NOT EXISTS wal_idx_seq ON wal(seq);
 CREATE INDEX IF NOT EXISTS wal_idx_type ON wal(type);
