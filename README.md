@@ -321,6 +321,12 @@ CREATE VIRTUAL TABLE wal USING wal_query(
 );
 ```
 
+Optional indexes (load in sqlite3):
+
+```
+.read ./tools/wal_query.sql
+```
+
 ### wal_mock (compile-time)
 
 Build the library with WAL mock (prints to stderr, no file I/O):
