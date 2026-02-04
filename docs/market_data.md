@@ -95,6 +95,19 @@ records can resolve price/product/remaining without rescanning the book.
 - If no WAL records affect a ladder, the **same snapshot** is still published.
 - Dirty flags are used to skip re‑serialization work when unchanged.
 
+## Delta vs Full Snapshot Publishing
+
+- **Delta publishing (default):**
+  - Only changed price levels are published each tick.
+  - Backed by per‑ladder delta maps (price → delta).
+  - Lowest bandwidth and fastest publish when changes are sparse.
+
+- **Full snapshot publishing (optional):**
+  - Publishes all top‑N price levels every tick.
+  - Enable with `OmMarketConfig.enable_full_snapshot = true`.
+  - Use `om_market_worker_copy_full` / `om_market_worker_copy_public_full` APIs.
+  - Higher bandwidth/CPU but simpler consumers.
+
 ## Performance Estimate (Order of Magnitude)
 
 Let:

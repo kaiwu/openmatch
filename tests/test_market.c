@@ -141,6 +141,7 @@ START_TEST(test_market_worker_dealable) {
         .expected_subscribers_per_product = 1,
         .expected_price_levels = 4,
         .top_levels = 1,
+        .enable_full_snapshot = false,
         .dealable = test_marketable,
         .dealable_ctx = NULL
     };
@@ -186,6 +187,21 @@ START_TEST(test_market_worker_dealable) {
     ck_assert_int_eq(om_market_worker_clear_public_dirty(worker, 0), 0);
     ck_assert_int_eq(om_market_worker_is_dirty(worker, 2, 0), 0);
     ck_assert_int_eq(om_market_worker_is_public_dirty(worker, 0), 0);
+    OmMarketDelta deltas[4];
+    ck_assert_int_eq(om_market_worker_public_delta_count(worker, 0, OM_SIDE_BID), 2);
+    ck_assert_int_eq(om_market_worker_copy_public_deltas(worker, 0, OM_SIDE_BID, deltas, 4), 2);
+    bool found_10 = false;
+    for (int i = 0; i < 2; i++) {
+        if (deltas[i].price == 10 && deltas[i].delta == 50) {
+            found_10 = true;
+        }
+    }
+    ck_assert(found_10);
+    ck_assert_int_eq(om_market_worker_copy_public_full(worker, 0, OM_SIDE_BID, deltas, 4), 1);
+    ck_assert_uint_eq(deltas[0].price, 10);
+    ck_assert_int_eq(deltas[0].delta, 50);
+    ck_assert_int_eq(om_market_worker_clear_public_deltas(worker, 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_worker_public_delta_count(worker, 0, OM_SIDE_BID), 0);
     ck_assert_int_eq(om_market_worker_is_subscribed(worker, 2, 0), 1);
     ck_assert_int_eq(om_market_worker_is_subscribed(worker, 2, 1), 0);
 

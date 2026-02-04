@@ -39,11 +39,17 @@ typedef struct OmMarketOrderState {
 KHASH_MAP_INIT_INT64(om_market_price_map, uint64_t)
 KHASH_MAP_INIT_INT64(om_market_order_map, OmMarketOrderState)
 KHASH_MAP_INIT_INT(om_market_pair_map, uint32_t)
+KHASH_MAP_INIT_INT64(om_market_delta_map, int64_t)
 
 typedef struct OmMarketLadder {
     khash_t(om_market_price_map) *bid;
     khash_t(om_market_price_map) *ask;
 } OmMarketLadder;
+
+typedef struct OmMarketDelta {
+    uint64_t price;
+    int64_t delta;
+} OmMarketDelta;
 
 
 typedef uint64_t (*OmMarketDealableFn)(const OmWalInsert *rec, uint16_t viewer_org, void *ctx);
@@ -63,8 +69,10 @@ typedef struct OmMarketWorker {
     uint32_t top_levels;
     OmMarketLadder *ladders;
     uint8_t *ladder_dirty;
+    khash_t(om_market_delta_map) **ladder_deltas;
     OmMarketLadder *public_ladders;
     uint8_t *public_dirty;
+    khash_t(om_market_delta_map) **public_deltas;
     khash_t(om_market_pair_map) *pair_to_ladder;
     khash_t(om_market_order_map) **orders;
     khash_t(om_market_order_map) *public_orders;
@@ -82,6 +90,7 @@ typedef struct OmMarketConfig {
     size_t expected_subscribers_per_product; /**< Avg orgs per product */
     size_t expected_price_levels;
     uint32_t top_levels;                      /**< Top N price levels to aggregate */
+    bool enable_full_snapshot;                /**< Enable full snapshot publishing (optional) */
     OmMarketDealableFn dealable;
     void *dealable_ctx;
 } OmMarketConfig;
@@ -91,6 +100,7 @@ typedef struct OmMarket {
     uint32_t worker_count;
     uint16_t max_products;
     uint32_t top_levels;
+    bool enable_full_snapshot;
     OmMarketDealableFn dealable;
     void *dealable_ctx;
 } OmMarket;
@@ -181,6 +191,82 @@ int om_market_worker_get_public_qty(const OmMarketWorker *worker,
 int om_market_worker_is_subscribed(const OmMarketWorker *worker,
                                   uint16_t org_id,
                                   uint16_t product_id);
+
+/**
+ * Get count of private ladder deltas for (org, product, side).
+ * @return count on success, 0 if none, negative on error
+ */
+int om_market_worker_delta_count(const OmMarketWorker *worker,
+                                 uint16_t org_id,
+                                 uint16_t product_id,
+                                 uint16_t side);
+
+/**
+ * Copy private ladder deltas into caller buffer.
+ * @return number of deltas copied, negative on error
+ */
+int om_market_worker_copy_deltas(const OmMarketWorker *worker,
+                                 uint16_t org_id,
+                                 uint16_t product_id,
+                                 uint16_t side,
+                                 OmMarketDelta *out,
+                                 size_t max);
+
+/**
+ * Clear private ladder deltas after publish.
+ * @return 0 on success, negative on error
+ */
+int om_market_worker_clear_deltas(OmMarketWorker *worker,
+                                  uint16_t org_id,
+                                  uint16_t product_id,
+                                  uint16_t side);
+
+/**
+ * Get count of public ladder deltas for product/side.
+ * @return count on success, 0 if none, negative on error
+ */
+int om_market_worker_public_delta_count(const OmMarketWorker *worker,
+                                        uint16_t product_id,
+                                        uint16_t side);
+
+/**
+ * Copy public ladder deltas into caller buffer.
+ * @return number of deltas copied, negative on error
+ */
+int om_market_worker_copy_public_deltas(const OmMarketWorker *worker,
+                                        uint16_t product_id,
+                                        uint16_t side,
+                                        OmMarketDelta *out,
+                                        size_t max);
+
+/**
+ * Clear public ladder deltas after publish.
+ * @return 0 on success, negative on error
+ */
+int om_market_worker_clear_public_deltas(OmMarketWorker *worker,
+                                         uint16_t product_id,
+                                         uint16_t side);
+
+/**
+ * Copy full private ladder (top-N) for (org, product, side).
+ * @return number of levels copied, negative on error
+ */
+int om_market_worker_copy_full(const OmMarketWorker *worker,
+                               uint16_t org_id,
+                               uint16_t product_id,
+                               uint16_t side,
+                               OmMarketDelta *out,
+                               size_t max);
+
+/**
+ * Copy full public ladder (top-N) for product/side.
+ * @return number of levels copied, negative on error
+ */
+int om_market_worker_copy_public_full(const OmMarketWorker *worker,
+                                      uint16_t product_id,
+                                      uint16_t side,
+                                      OmMarketDelta *out,
+                                      size_t max);
 
 /**
  * Check whether a ladder changed since last publish.
