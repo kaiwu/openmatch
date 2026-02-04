@@ -18,6 +18,16 @@ add_library(openmatch_static STATIC ${OPENMATCH_SOURCES} ${OPENMATCH_WAL_SOURCES
 
 add_library(openmatch ALIAS openmatch_shared)
 
+set(OPENMARKET_SOURCES
+    om_market.c
+    om_worker.c
+)
+
+add_library(openmarket_shared SHARED ${OPENMARKET_SOURCES})
+add_library(openmarket_static STATIC ${OPENMARKET_SOURCES})
+
+add_library(openmarket ALIAS openmarket_shared)
+
 if(USE_KHASHL)
     target_compile_definitions(openmatch_shared PRIVATE OM_USE_KHASHL)
     target_compile_definitions(openmatch_static PRIVATE OM_USE_KHASHL)
@@ -40,6 +50,18 @@ target_include_directories(openmatch_static
         $<INSTALL_INTERFACE:include>
 )
 
+target_include_directories(openmarket_shared
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(openmarket_static
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
 set_target_properties(openmatch_shared PROPERTIES
     OUTPUT_NAME openmatch
     VERSION ${PROJECT_VERSION}
@@ -52,8 +74,20 @@ set_target_properties(openmatch_static PROPERTIES
     PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmatch/om_slab.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_hash.h;${CMAKE_SOURCE_DIR}/include/openmatch/orderbook.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_wal.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_perf.h;${CMAKE_SOURCE_DIR}/include/openmatch/om_engine.h"
 )
 
-install(TARGETS openmatch_shared openmatch_static
+set_target_properties(openmarket_shared PROPERTIES
+    OUTPUT_NAME openmarket
+    VERSION ${PROJECT_VERSION}
+    SOVERSION 1
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmarket/om_market.h;${CMAKE_SOURCE_DIR}/include/openmarket/om_worker.h"
+)
+
+set_target_properties(openmarket_static PROPERTIES
+    OUTPUT_NAME openmarket
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/openmarket/om_market.h;${CMAKE_SOURCE_DIR}/include/openmarket/om_worker.h"
+)
+
+install(TARGETS openmatch_shared openmatch_static openmarket_shared openmarket_static
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
-    PUBLIC_HEADER DESTINATION include/openmatch
+    PUBLIC_HEADER DESTINATION include
 )

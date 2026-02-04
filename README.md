@@ -166,6 +166,11 @@ Order deactivation/activation:
 - `om_engine_deactivate(order_id)` (remove from book, keep slot)
 - `om_engine_activate(order_id)` (reattempt match as taker)
 
+### Market Data (OpenMarket)
+
+See [docs/market_data.md](docs/market_data.md) for aggregation flow, public/private ladders,
+and per‑record behavior.
+
 ## Example (Minimal)
 
 ```c
