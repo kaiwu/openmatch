@@ -7,7 +7,7 @@ This document describes how OpenMarket consumes WAL records and builds
 
 - **Public ladder**: total remaining quantity at each price level for a product.
 - **Private ladder**: dealable remaining quantity per org at each price level.
-- **Top-N**: only the top `N` price levels are aggregated per side (bid/ask).
+- **Top-N**: the top `N` price levels published per side (bid/ask). See "Dynamic Ladder" below.
 - **Dealable callback**: `uint64_t dealable(const OmWalInsert *rec, uint16_t viewer_org, void *ctx)`
   returns the maximum dealable quantity for an org at insert time (0 = not dealable).
 
@@ -20,7 +20,7 @@ This document describes how OpenMarket consumes WAL records and builds
 
 ## Memory Layout
 
-### Price Level Structure (16 bytes, cache-aligned)
+### Price Level Structure (16 bytes)
 
 ```c
 typedef struct OmMarketLevel {
@@ -29,67 +29,76 @@ typedef struct OmMarketLevel {
 } OmMarketLevel;
 
 typedef struct OmMarketLadder {
-    OmMarketLevel *bid_levels;  // points into contiguous block
-    OmMarketLevel *ask_levels;  // points into contiguous block
-    uint32_t bid_count;         // actual populated levels (0..top_levels)
+    OmMarketLevel *bid_levels;  // dynamic sorted array for bids
+    OmMarketLevel *ask_levels;  // dynamic sorted array for asks
+    uint32_t bid_count;         // actual populated levels
     uint32_t ask_count;
+    uint32_t bid_capacity;      // allocated capacity
+    uint32_t ask_capacity;
 } OmMarketLadder;
 ```
 
-### Private Worker Memory Layout
+### Dynamic Ladder Design
 
-Each private worker allocates its own **cache-line aligned** contiguous block:
+Each ladder maintains a **dynamic sorted array** that tracks **ALL price levels** (not just top-N):
 
-```
-levels_block: aligned_alloc(64, sub_count * top_levels * 2 * sizeof(OmMarketLevel))
-┌─────────────────────────────────────────────────────────────────────┐
-│ ladder0_bid │ ladder0_ask │ ladder1_bid │ ladder1_ask │ ...         │
-│ [top_levels]│ [top_levels]│ [top_levels]│ [top_levels]│             │
-└─────────────────────────────────────────────────────────────────────┘
-       ↑             ↑             ↑             ↑
-  ladders[0].bid  ladders[0].ask  ladders[1].bid  ladders[1].ask
-
-ladder_dirty: aligned_alloc(64, sub_count)  // separate aligned block
-```
-
-For `top_levels=10` and 100 subscriptions: `100 * 10 * 2 * 16 = 32 KB` contiguous.
-
-### Public Worker Memory Layout
-
-Each public worker allocates its own **cache-line aligned** contiguous block:
+- Arrays are preallocated with `expected_price_levels` capacity
+- Arrays grow dynamically (2x growth factor) when capacity is exceeded
+- Top-N filtering happens **only at publish time**, not at insert time
+- This ensures prices that drop out of top-N can re-enter when better prices are removed
 
 ```
-levels_block: aligned_alloc(64, max_products * top_levels * 2 * sizeof(OmMarketLevel))
-┌─────────────────────────────────────────────────────────────────────┐
-│ prod0_bid   │ prod0_ask   │ prod1_bid   │ prod1_ask   │ ...         │
-│ [top_levels]│ [top_levels]│ [top_levels]│ [top_levels]│             │
-└─────────────────────────────────────────────────────────────────────┘
+Initial allocation per ladder (bid or ask side):
+┌──────────────────────────────────────────────────┐
+│ level[0] │ level[1] │ level[2] │ ... │ level[N-1] │ (unused capacity)
+└──────────────────────────────────────────────────┘
+     ↑ best                             ↑ worst
+```
 
-dirty: aligned_alloc(64, max_products)  // separate aligned block
+### Worker Memory Layout
+
+Each ladder owns its **own separate dynamic arrays**:
+
+```
+Private Worker:
+  ladders[0]: bid_levels -> [dynamically allocated]
+              ask_levels -> [dynamically allocated]
+  ladders[1]: bid_levels -> [dynamically allocated]
+              ask_levels -> [dynamically allocated]
+  ...
+  ladder_dirty: aligned_alloc(64, sub_count)  // 64-byte aligned
+
+Public Worker:
+  ladders[0]: bid_levels -> [dynamically allocated]
+              ask_levels -> [dynamically allocated]
+  ladders[1]: bid_levels -> [dynamically allocated]
+              ask_levels -> [dynamically allocated]
+  ...
+  dirty: aligned_alloc(64, max_products)  // 64-byte aligned
 ```
 
 ### False Sharing Prevention
 
 Each worker (private and public) has **completely separate memory allocations**:
-- `levels_block` - 64-byte aligned, owned exclusively by one worker
-- `ladder_dirty` / `dirty` - 64-byte aligned, owned exclusively by one worker
+- Per-ladder arrays are owned exclusively by that ladder
+- `ladder_dirty` / `dirty` flags are 64-byte aligned, owned exclusively by one worker
 - No shared counters or flags in the hot path between workers
 
-### Benefits of Contiguous Layout
+### Benefits of Dynamic Arrays
 
-1. **Cache efficiency**: Sequential access during publish (copy_full) stays in L1/L2.
-2. **Predictable memory**: Fixed allocation, no rehashing spikes.
-3. **SIMD-friendly**: Contiguous arrays can be vectorized for bulk operations.
-4. **Low TLB pressure**: Single large allocation vs many small hash buckets.
+1. **Correctness**: Prices outside top-N at insert time can become top-N later when other prices are removed.
+2. **Cache efficiency**: Sorted arrays provide sequential access during publish.
+3. **Simple logic**: No promotion scanning needed - all prices are tracked.
+4. **Predictable publish**: `copy_full(max=N)` always returns exactly top-N in O(N) time.
 
 ### Sorted Array Operations
 
 Price levels are maintained as **sorted arrays** (bids descending, asks ascending):
 
-- **Insert**: O(log N) binary search + O(N) memmove. Since N ≤ top_levels (typically 5-20), this is ~50-100 bytes of movement.
+- **Insert**: O(log N) binary search + O(N) memmove. N is typically small (10-50 levels per product/side).
 - **Remove**: O(log N) search + O(N) memmove.
 - **Lookup**: O(log N) binary search in L1 cache.
-- **Publish**: O(N) sequential copy - **cache optimal**.
+- **Publish**: O(top_levels) sequential copy - **cache optimal**.
 
 ## Record Flow
 
@@ -158,14 +167,15 @@ records can resolve price/product/remaining without rescanning the book.
 
 - For each per-org order map that contains the maker order, subtract matched quantity.
 
-## Top-N Enforcement
+## Top-N Enforcement (At Publish Time)
 
-- Aggregation only happens for the **top N price levels** per side.
-- When adding a new price level:
-  - Binary search finds insertion position.
-  - If position >= top_levels, the price is **ignored** (outside top-N).
-  - Otherwise, insert and shift; if array was full, the worst level is dropped.
-- Removal simply shifts remaining elements and decrements count.
+- **ALL price levels** are aggregated and stored in the dynamic sorted arrays.
+- Top-N filtering happens **only at publish time**, not at insert/remove time.
+- When publishing:
+  - Call `om_market_*_copy_full(worker, ..., out, top_levels)` to get the top N levels.
+  - The sorted array is already in best-to-worst order, so copy is O(N).
+  - Prices outside the top N are automatically excluded by the `max` parameter.
+- This design ensures prices can move in and out of top-N dynamically as the order book changes.
 
 ## Publish Cadence
 
@@ -208,32 +218,35 @@ records can resolve price/product/remaining without rescanning the book.
     4. `om_market_worker_clear_deltas(worker, org_id, product_id, side)`
 
 - **Full snapshot publishing (cache-optimal):**
-  - Publishes all top-N price levels every tick.
+  - Publishes top-N price levels every tick.
   - Use `om_market_worker_copy_full` / `om_market_public_copy_full` APIs.
+  - **Pass `top_levels` as the `max` parameter** to get exactly top-N levels.
   - **Optimized for contiguous memory**: simple sequential array copy.
   - Higher bandwidth but simpler consumers and predictable latency.
   - **Public full steps:**
-    1. `n = om_market_public_copy_full(worker, product_id, side, out, max)`
+    1. `n = om_market_public_copy_full(worker, product_id, side, out, top_levels)`
     2. Serialize `out[0..n)` and publish to subscribers of `product_id`.
     3. `om_market_public_clear_dirty(worker, product_id)`
   - **Private full steps:**
-    1. `n = om_market_worker_copy_full(worker, org_id, product_id, side, out, max)`
+    1. `n = om_market_worker_copy_full(worker, org_id, product_id, side, out, top_levels)`
     2. Serialize `out[0..n)` and publish to that org.
     3. `om_market_worker_clear_dirty(worker, org_id, product_id)`
 
 ## Performance Estimate (Order of Magnitude)
 
-### Contiguous Memory Performance Gains
+### Dynamic Sorted Array Performance
 
-| Operation | Hash-based | Sorted Array | Gain |
-|-----------|------------|--------------|------|
-| copy_full (publish) | ~200-500 ns | ~20-50 ns | **5-10x** |
-| Price lookup | ~15-30 ns | ~10-20 ns | ~1.5x |
-| Insert at best | ~20-40 ns | ~30-50 ns | ~0.7x |
-| Cache locality | Poor | Excellent | ~3-5x |
+| Operation | Hash-based | Dynamic Sorted Array | Notes |
+|-----------|------------|----------------------|-------|
+| copy_full (publish) | ~200-500 ns | ~20-50 ns | **Sequential copy, cache optimal** |
+| Price lookup | ~15-30 ns | ~10-20 ns | Binary search in L1 cache |
+| Insert | ~20-40 ns | ~30-80 ns | O(log N) search + O(N) memmove |
+| Remove | ~15-25 ns | ~20-50 ns | O(log N) search + O(N) memmove |
+| Grow array | N/A | ~50-200 ns | Amortized O(1), rare |
 
-The biggest win is in **full snapshot publishing**, which is now a simple
-sequential copy of contiguous memory instead of hash table iteration + sorting.
+The biggest win is in **full snapshot publishing**, which is a simple
+sequential copy of contiguous memory. Insert/remove are slightly slower
+due to memmove, but N is typically small (10-50 levels per product/side).
 
 ### Refactor impact (public/private split)
 
@@ -289,17 +302,20 @@ distribution above; it is an order-of-magnitude estimate.
 
 ## Optimization Suggestions
 
-1. **Keep top-N small** (e.g., 5-20). Memory and memmove costs grow with N.
-2. **Make dealable fast**: simple bit checks, precomputed org/product rules, no I/O.
-3. **Batch WAL processing**: process 256-1024 records per batch to amortize overhead.
-4. **Preallocate order maps**: size order maps to avoid rehash/resize.
-5. **Use dense arrays if order_id is dense** for public order map (faster than hash).
-6. **Dirty-flag publishing**: skip serialization if no change; still publish cached snapshot.
-7. **Right-size public workers**: size `W_public` so each handles a stable product set; avoid
+1. **Set `expected_price_levels` appropriately**: This controls initial capacity for ladder arrays.
+   Set it to the typical number of distinct price levels per product/side (e.g., 20-50).
+2. **Keep top-N small** (e.g., 5-20) for publishing. The ladder tracks all prices, but publish
+   only copies top-N which affects serialization bandwidth.
+3. **Make dealable fast**: simple bit checks, precomputed org/product rules, no I/O.
+4. **Batch WAL processing**: process 256-1024 records per batch to amortize overhead.
+5. **Preallocate order maps**: size order maps to avoid rehash/resize.
+6. **Use dense arrays if order_id is dense** for public order map (faster than hash).
+7. **Dirty-flag publishing**: skip serialization if no change; still publish cached snapshot.
+8. **Right-size public workers**: size `W_public` so each handles a stable product set; avoid
    a single public worker becoming a hotspot.
-8. **Worker isolation**: each worker's hot data (levels_block, dirty flags) is already
-   cache-line aligned and separately allocated to prevent false sharing.
-9. **Prefer full snapshot over delta** when most levels change each tick (simpler, cache-optimal).
+9. **Worker isolation**: each worker's dirty flags are 64-byte aligned and separately
+   allocated to prevent false sharing between worker threads.
+10. **Prefer full snapshot over delta** when most levels change each tick (simpler, cache-optimal).
 
 These are order-of-magnitude estimates; actual throughput depends on dealable logic,
-cache locality, and top-N settings.
+cache locality, and expected_price_levels settings.

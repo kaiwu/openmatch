@@ -50,6 +50,8 @@ typedef struct OmMarketLadder {
     OmMarketLevel *ask_levels;      /**< Contiguous sorted array for asks (best first) */
     uint32_t bid_count;             /**< Actual populated bid levels */
     uint32_t ask_count;             /**< Actual populated ask levels */
+    uint32_t bid_capacity;          /**< Allocated capacity for bids */
+    uint32_t ask_capacity;          /**< Allocated capacity for asks */
 } OmMarketLadder;
 
 typedef struct OmMarketDelta {
@@ -73,8 +75,8 @@ typedef struct OmMarketWorker {
     size_t ladder_index_stride;
     uint8_t *product_has_subs;
     uint32_t top_levels;
-    OmMarketLadder *ladders;
-    OmMarketLevel *levels_block;    /**< Single contiguous block for all levels */
+    uint32_t initial_capacity;      /**< Initial capacity per side for ladder arrays */
+    OmMarketLadder *ladders;        /**< Each ladder owns its own dynamic arrays */
     uint8_t *ladder_dirty;
     khash_t(om_market_delta_map) **ladder_deltas;
     khash_t(om_market_pair_map) *pair_to_ladder;
@@ -87,8 +89,8 @@ typedef struct OmMarketPublicWorker {
     uint16_t max_products;
     uint8_t *product_has_subs;
     uint32_t top_levels;
-    OmMarketLadder *ladders;
-    OmMarketLevel *levels_block;    /**< Single contiguous block for all levels */
+    uint32_t initial_capacity;      /**< Initial capacity per side for ladder arrays */
+    OmMarketLadder *ladders;        /**< Each ladder owns its own dynamic arrays */
     uint8_t *dirty;
     khash_t(om_market_delta_map) **deltas;
     khash_t(om_market_order_map) *orders;

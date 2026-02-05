@@ -192,7 +192,10 @@ START_TEST(test_market_worker_dealable) {
     };
     ck_assert_int_eq(om_market_worker_process(worker, OM_WAL_INSERT, &insert2), 0);
     ck_assert_int_eq(om_market_public_process(&market.public_workers[0], OM_WAL_INSERT, &insert2), 0);
-    ck_assert_int_ne(om_market_public_get_qty(&market.public_workers[0], 0, OM_SIDE_BID, 9, &qty), 0);
+    /* All prices are now tracked in the ladder (not just top-N) */
+    ck_assert_int_eq(om_market_public_get_qty(&market.public_workers[0], 0, OM_SIDE_BID, 9, &qty), 0);
+    ck_assert_uint_eq(qty, 30);
+    /* Org 2 can't see its own order due to dealable callback */
     ck_assert_int_ne(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 9, &qty), 0);
     ck_assert_int_eq(om_market_worker_is_dirty(worker, 2, 0), 1);
     ck_assert_int_eq(om_market_public_is_dirty(&market.public_workers[0], 0), 1);
@@ -210,7 +213,8 @@ START_TEST(test_market_worker_dealable) {
         }
     }
     ck_assert(found_10);
-    ck_assert_int_eq(om_market_public_copy_full(&market.public_workers[0], 0, OM_SIDE_BID, deltas, 4), 1);
+    /* With dynamic ladder, all prices are tracked. Use max=1 to get top-1 only */
+    ck_assert_int_eq(om_market_public_copy_full(&market.public_workers[0], 0, OM_SIDE_BID, deltas, 1), 1);
     ck_assert_uint_eq(deltas[0].price, 10);
     ck_assert_int_eq(deltas[0].delta, 50);
     ck_assert_int_eq(om_market_public_clear_deltas(&market.public_workers[0], 0, OM_SIDE_BID), 0);
@@ -398,8 +402,8 @@ START_TEST(test_market_multi_org_visibility) {
 }
 END_TEST
 
-/* Test top-N promotion: when a level is removed, next-best should be promoted */
-START_TEST(test_market_top_n_promotion) {
+/* Test dynamic ladder: all prices are tracked, top-N applied at publish time */
+START_TEST(test_market_dynamic_ladder) {
     OmMarket market;
     uint32_t org_to_worker[UINT16_MAX + 1U];
     for (uint32_t i = 0; i <= UINT16_MAX; i++) {
@@ -420,7 +424,7 @@ START_TEST(test_market_top_n_promotion) {
         .expected_orders_per_worker = 8,
         .expected_subscribers_per_product = 2,
         .expected_price_levels = 8,
-        .top_levels = 3,  /* Only top 3 price levels */
+        .top_levels = 3,  /* Publish top 3 price levels */
         .dealable = test_marketable,
         .dealable_ctx = NULL
     };
@@ -431,7 +435,6 @@ START_TEST(test_market_top_n_promotion) {
     ck_assert_ptr_nonnull(worker);
 
     /* Insert 4 bid orders at prices 100, 90, 80, 70 (from org 1, visible to org 2) */
-    /* For bids, best = highest, so top-3 should be 100, 90, 80 */
     OmWalInsert orders[4] = {
         {.order_id = 1, .price = 100, .volume = 10, .vol_remain = 10, .org = 1,
          .flags = OM_SIDE_BID, .product_id = 0},
@@ -448,7 +451,7 @@ START_TEST(test_market_top_n_promotion) {
         ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &orders[i]), 0);
     }
 
-    /* Verify top-3 for private worker (org 2 viewing org 1's orders) */
+    /* ALL prices are tracked in the ladder (dynamic, not capped) */
     uint64_t qty = 0;
     ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 100, &qty), 0);
     ck_assert_uint_eq(qty, 10);
@@ -456,47 +459,44 @@ START_TEST(test_market_top_n_promotion) {
     ck_assert_uint_eq(qty, 20);
     ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 80, &qty), 0);
     ck_assert_uint_eq(qty, 30);
-    /* Price 70 should NOT be in top-3 */
-    ck_assert_int_ne(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 70, &qty), 0);
+    ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 70, &qty), 0);
+    ck_assert_uint_eq(qty, 40);  /* Price 70 is also tracked! */
 
-    /* Same for public worker */
+    /* Public worker also tracks all prices */
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 100, &qty), 0);
-    ck_assert_uint_eq(qty, 10);
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 90, &qty), 0);
-    ck_assert_uint_eq(qty, 20);
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 80, &qty), 0);
-    ck_assert_uint_eq(qty, 30);
-    ck_assert_int_ne(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 70, &qty), 0);
+    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 70, &qty), 0);
+
+    /* But copy_full with max=3 returns only top-3 */
+    OmMarketDelta full[4];
+    int n = om_market_public_copy_full(pub, 0, OM_SIDE_BID, full, 3);
+    ck_assert_int_eq(n, 3);
+    /* Sorted descending (best bids first): 100, 90, 80 */
+    ck_assert_uint_eq(full[0].price, 100);
+    ck_assert_int_eq(full[0].delta, 10);
+    ck_assert_uint_eq(full[1].price, 90);
+    ck_assert_int_eq(full[1].delta, 20);
+    ck_assert_uint_eq(full[2].price, 80);
+    ck_assert_int_eq(full[2].delta, 30);
 
     /* Cancel order at price 90 */
     OmWalCancel cancel = {.order_id = 2, .product_id = 0};
     ck_assert_int_eq(om_market_worker_process(worker, OM_WAL_CANCEL, &cancel), 0);
     ck_assert_int_eq(om_market_public_process(pub, OM_WAL_CANCEL, &cancel), 0);
 
-    /* After removing price 90, price 70 should be PROMOTED into top-3 */
-    /* New top-3 should be: 100, 80, 70 */
+    /* Price 90 is removed, remaining: 100, 80, 70 */
     ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 100, &qty), 0);
     ck_assert_uint_eq(qty, 10);
     ck_assert_int_ne(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 90, &qty), 0);  /* Removed */
     ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 80, &qty), 0);
     ck_assert_uint_eq(qty, 30);
-    ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 70, &qty), 0);  /* PROMOTED! */
+    ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 70, &qty), 0);
     ck_assert_uint_eq(qty, 40);
 
-    /* Same for public worker */
-    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 100, &qty), 0);
-    ck_assert_uint_eq(qty, 10);
-    ck_assert_int_ne(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 90, &qty), 0);  /* Removed */
-    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 80, &qty), 0);
-    ck_assert_uint_eq(qty, 30);
-    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 70, &qty), 0);  /* PROMOTED! */
-    ck_assert_uint_eq(qty, 40);
-
-    /* Verify full snapshot shows 3 levels */
-    OmMarketDelta full[4];
-    int n = om_market_public_copy_full(pub, 0, OM_SIDE_BID, full, 4);
+    /* Now copy_full with max=3 returns: 100, 80, 70 (70 naturally appears as top-3) */
+    n = om_market_public_copy_full(pub, 0, OM_SIDE_BID, full, 3);
     ck_assert_int_eq(n, 3);
-    /* Should be sorted: 100, 80, 70 (bids descending) */
     ck_assert_uint_eq(full[0].price, 100);
     ck_assert_int_eq(full[0].delta, 10);
     ck_assert_uint_eq(full[1].price, 80);
@@ -508,8 +508,8 @@ START_TEST(test_market_top_n_promotion) {
 }
 END_TEST
 
-/* Test top-N promotion for ask side (ascending order) */
-START_TEST(test_market_top_n_promotion_ask) {
+/* Test dynamic ladder for ask side (ascending order) */
+START_TEST(test_market_dynamic_ladder_ask) {
     OmMarket market;
     uint32_t org_to_worker[UINT16_MAX + 1U];
     for (uint32_t i = 0; i <= UINT16_MAX; i++) {
@@ -530,7 +530,7 @@ START_TEST(test_market_top_n_promotion_ask) {
         .expected_orders_per_worker = 8,
         .expected_subscribers_per_product = 2,
         .expected_price_levels = 8,
-        .top_levels = 3,  /* Only top 3 price levels */
+        .top_levels = 3,  /* Publish top 3 price levels */
         .dealable = test_marketable,
         .dealable_ctx = NULL
     };
@@ -538,8 +538,7 @@ START_TEST(test_market_top_n_promotion_ask) {
     ck_assert_int_eq(om_market_init(&market, &cfg), 0);
     OmMarketPublicWorker *pub = &market.public_workers[0];
 
-    /* Insert 4 ask orders at prices 10, 20, 30, 40 (ascending) */
-    /* For asks, best = lowest, so top-3 should be 10, 20, 30 */
+    /* Insert 4 ask orders at prices 10, 20, 30, 40 */
     OmWalInsert orders[4] = {
         {.order_id = 1, .price = 10, .volume = 10, .vol_remain = 10, .org = 1,
          .flags = OM_SIDE_ASK, .product_id = 0},
@@ -555,33 +554,27 @@ START_TEST(test_market_top_n_promotion_ask) {
         ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &orders[i]), 0);
     }
 
-    /* Verify top-3: 10, 20, 30 (not 40) */
+    /* All 4 prices are tracked */
     uint64_t qty = 0;
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 10, &qty), 0);
-    ck_assert_uint_eq(qty, 10);
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 20, &qty), 0);
-    ck_assert_uint_eq(qty, 20);
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 30, &qty), 0);
-    ck_assert_uint_eq(qty, 30);
-    ck_assert_int_ne(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 40, &qty), 0);  /* Outside top-3 */
+    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 40, &qty), 0);
+
+    /* Copy_full with max=3 returns top-3 asks (ascending: 10, 20, 30) */
+    OmMarketDelta full[4];
+    int n = om_market_public_copy_full(pub, 0, OM_SIDE_ASK, full, 3);
+    ck_assert_int_eq(n, 3);
+    ck_assert_uint_eq(full[0].price, 10);
+    ck_assert_uint_eq(full[1].price, 20);
+    ck_assert_uint_eq(full[2].price, 30);
 
     /* Cancel order at price 20 */
     OmWalCancel cancel = {.order_id = 2, .product_id = 0};
     ck_assert_int_eq(om_market_public_process(pub, OM_WAL_CANCEL, &cancel), 0);
 
-    /* After removing price 20, price 40 should be PROMOTED */
-    /* New top-3 should be: 10, 30, 40 */
-    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 10, &qty), 0);
-    ck_assert_uint_eq(qty, 10);
-    ck_assert_int_ne(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 20, &qty), 0);  /* Removed */
-    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 30, &qty), 0);
-    ck_assert_uint_eq(qty, 30);
-    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_ASK, 40, &qty), 0);  /* PROMOTED! */
-    ck_assert_uint_eq(qty, 40);
-
-    /* Verify full snapshot shows 3 levels sorted ascending */
-    OmMarketDelta full[4];
-    int n = om_market_public_copy_full(pub, 0, OM_SIDE_ASK, full, 4);
+    /* Now top-3 should be: 10, 30, 40 */
+    n = om_market_public_copy_full(pub, 0, OM_SIDE_ASK, full, 3);
     ck_assert_int_eq(n, 3);
     ck_assert_uint_eq(full[0].price, 10);
     ck_assert_uint_eq(full[1].price, 30);
@@ -591,8 +584,8 @@ START_TEST(test_market_top_n_promotion_ask) {
 }
 END_TEST
 
-/* Test top-N promotion with MATCH (partial fill removing a level) */
-START_TEST(test_market_top_n_promotion_match) {
+/* Test dynamic ladder with MATCH removing a level */
+START_TEST(test_market_dynamic_ladder_match) {
     OmMarket market;
     uint32_t org_to_worker[UINT16_MAX + 1U];
     for (uint32_t i = 0; i <= UINT16_MAX; i++) {
@@ -613,7 +606,7 @@ START_TEST(test_market_top_n_promotion_match) {
         .expected_orders_per_worker = 8,
         .expected_subscribers_per_product = 2,
         .expected_price_levels = 8,
-        .top_levels = 2,  /* Only top 2 price levels */
+        .top_levels = 2,  /* Publish top 2 price levels */
         .dealable = test_marketable,
         .dealable_ctx = NULL
     };
@@ -621,7 +614,7 @@ START_TEST(test_market_top_n_promotion_match) {
     ck_assert_int_eq(om_market_init(&market, &cfg), 0);
     OmMarketPublicWorker *pub = &market.public_workers[0];
 
-    /* Insert 3 bid orders: top-2 should be 100, 90 (not 80) */
+    /* Insert 3 bid orders */
     OmWalInsert orders[3] = {
         {.order_id = 1, .price = 100, .volume = 10, .vol_remain = 10, .org = 1,
          .flags = OM_SIDE_BID, .product_id = 0},
@@ -635,21 +628,29 @@ START_TEST(test_market_top_n_promotion_match) {
         ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &orders[i]), 0);
     }
 
+    /* All 3 prices are tracked */
     uint64_t qty = 0;
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 100, &qty), 0);
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 90, &qty), 0);
-    ck_assert_int_ne(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 80, &qty), 0);  /* Outside */
+    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 80, &qty), 0);
 
     /* Match fully consumes order at price 100 */
     OmWalMatch match = {.maker_id = 1, .taker_id = 999, .volume = 10, .price = 100};
     ck_assert_int_eq(om_market_public_process(pub, OM_WAL_MATCH, &match), 0);
 
-    /* After removing price 100, price 80 should be promoted */
+    /* Price 100 is removed */
     ck_assert_int_ne(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 100, &qty), 0);  /* Removed */
     ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 90, &qty), 0);
     ck_assert_uint_eq(qty, 20);
-    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 80, &qty), 0);  /* PROMOTED! */
+    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 80, &qty), 0);
     ck_assert_uint_eq(qty, 30);
+
+    /* Copy_full with max=2 returns top-2: 90, 80 */
+    OmMarketDelta full[3];
+    int n = om_market_public_copy_full(pub, 0, OM_SIDE_BID, full, 2);
+    ck_assert_int_eq(n, 2);
+    ck_assert_uint_eq(full[0].price, 90);
+    ck_assert_uint_eq(full[1].price, 80);
 
     om_market_destroy(&market);
 }
@@ -664,9 +665,9 @@ Suite* market_suite(void) {
     tcase_add_test(tc_core, test_market_worker_dealable);
     tcase_add_test(tc_core, test_market_publish_combos);
     tcase_add_test(tc_core, test_market_multi_org_visibility);
-    tcase_add_test(tc_core, test_market_top_n_promotion);
-    tcase_add_test(tc_core, test_market_top_n_promotion_ask);
-    tcase_add_test(tc_core, test_market_top_n_promotion_match);
+    tcase_add_test(tc_core, test_market_dynamic_ladder);
+    tcase_add_test(tc_core, test_market_dynamic_ladder_ask);
+    tcase_add_test(tc_core, test_market_dynamic_ladder_match);
     suite_add_tcase(s, tc_core);
     return s;
 }
