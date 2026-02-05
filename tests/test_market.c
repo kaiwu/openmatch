@@ -212,6 +212,102 @@ START_TEST(test_market_worker_dealable) {
 }
 END_TEST
 
+START_TEST(test_market_publish_combos) {
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) {
+        org_to_worker[i] = 0;
+    }
+    OmMarketSubscription subs[2] = {
+        {.org_id = 1, .product_id = 0},
+        {.org_id = 2, .product_id = 0}
+    };
+    OmMarketConfig cfg = {
+        .max_products = 4,
+        .worker_count = 1,
+        .public_worker_count = 1,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
+        .subs = subs,
+        .sub_count = 2,
+        .expected_orders_per_worker = 4,
+        .expected_subscribers_per_product = 1,
+        .expected_price_levels = 4,
+        .top_levels = 1,
+        .dealable = test_marketable,
+        .dealable_ctx = NULL
+    };
+
+    ck_assert_int_eq(om_market_init(&market, &cfg), 0);
+    OmMarketWorker *worker = om_market_worker(&market, 0);
+    ck_assert_ptr_nonnull(worker);
+
+    OmWalInsert insert = {
+        .order_id = 200,
+        .price = 20,
+        .volume = 40,
+        .vol_remain = 40,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    ck_assert_int_eq(om_market_worker_process(worker, OM_WAL_INSERT, &insert), 0);
+    ck_assert_int_eq(om_market_public_process(&market.public_workers[0], OM_WAL_INSERT, &insert), 0);
+
+    OmWalInsert insert_unsub = {
+        .order_id = 201,
+        .price = 21,
+        .volume = 10,
+        .vol_remain = 10,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 1
+    };
+    ck_assert_int_eq(om_market_worker_process(worker, OM_WAL_INSERT, &insert_unsub), 0);
+    ck_assert_int_eq(om_market_public_process(&market.public_workers[0], OM_WAL_INSERT,
+                                               &insert_unsub), 0);
+
+    OmMarketDelta deltas[4];
+    ck_assert_int_eq(om_market_worker_delta_count(worker, 2, 0, OM_SIDE_BID), 1);
+    ck_assert_int_eq(om_market_worker_copy_deltas(worker, 2, 0, OM_SIDE_BID, deltas, 4), 1);
+    ck_assert_uint_eq(deltas[0].price, 20);
+    ck_assert_int_eq(deltas[0].delta, 40);
+    ck_assert_int_eq(om_market_worker_clear_deltas(worker, 2, 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_worker_delta_count(worker, 2, 0, OM_SIDE_BID), 0);
+
+    ck_assert_int_eq(om_market_worker_copy_full(worker, 2, 0, OM_SIDE_BID, deltas, 4), 1);
+    ck_assert_uint_eq(deltas[0].price, 20);
+    ck_assert_int_eq(deltas[0].delta, 40);
+    ck_assert_int_eq(om_market_worker_clear_dirty(worker, 2, 0), 0);
+
+    ck_assert_int_eq(om_market_worker_delta_count(worker, 2, 1, OM_SIDE_BID), -1);
+    ck_assert_int_eq(om_market_worker_copy_deltas(worker, 2, 1, OM_SIDE_BID, deltas, 4), -1);
+    ck_assert_int_eq(om_market_worker_copy_full(worker, 2, 1, OM_SIDE_BID, deltas, 4), -1);
+
+    ck_assert_int_eq(om_market_public_delta_count(&market.public_workers[0], 0, OM_SIDE_BID), 1);
+    ck_assert_int_eq(om_market_public_copy_deltas(&market.public_workers[0], 0, OM_SIDE_BID,
+                                                  deltas, 4), 1);
+    ck_assert_uint_eq(deltas[0].price, 20);
+    ck_assert_int_eq(deltas[0].delta, 40);
+    ck_assert_int_eq(om_market_public_clear_deltas(&market.public_workers[0], 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_public_delta_count(&market.public_workers[0], 0, OM_SIDE_BID), 0);
+
+    ck_assert_int_eq(om_market_public_copy_full(&market.public_workers[0], 0, OM_SIDE_BID,
+                                                deltas, 4), 1);
+    ck_assert_uint_eq(deltas[0].price, 20);
+    ck_assert_int_eq(deltas[0].delta, 40);
+    ck_assert_int_eq(om_market_public_clear_dirty(&market.public_workers[0], 0), 0);
+
+    ck_assert_int_eq(om_market_public_delta_count(&market.public_workers[0], 1, OM_SIDE_BID), -1);
+    ck_assert_int_eq(om_market_public_copy_deltas(&market.public_workers[0], 1, OM_SIDE_BID,
+                                                  deltas, 4), -1);
+    ck_assert_int_eq(om_market_public_copy_full(&market.public_workers[0], 1, OM_SIDE_BID,
+                                                deltas, 4), -1);
+
+    om_market_destroy(&market);
+}
+END_TEST
+
 Suite* market_suite(void) {
     Suite *s = suite_create("market");
     TCase *tc_core = tcase_create("core");
@@ -219,6 +315,7 @@ Suite* market_suite(void) {
     tcase_add_test(tc_core, test_market_ring_batch);
     tcase_add_test(tc_core, test_market_ring_wait_notify);
     tcase_add_test(tc_core, test_market_worker_dealable);
+    tcase_add_test(tc_core, test_market_publish_combos);
     suite_add_tcase(s, tc_core);
     return s;
 }
