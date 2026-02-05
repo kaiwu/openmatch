@@ -834,7 +834,9 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
                     om_market_delta_for_ladder(worker, ladder_idx, state->side == OM_SIDE_BID);
                 om_market_delta_add(delta_map, state->price, -(int64_t)removed);
                 om_market_ladder_mark_dirty(worker, ladder_idx);
-                return ret;
+                if (ret != 0) {
+                    return ret;
+                }
             }
             return 0;
         }
@@ -861,7 +863,9 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
                     om_market_delta_for_ladder(worker, ladder_idx, state->side == OM_SIDE_BID);
                 om_market_delta_add(delta_map, state->price, (int64_t)added);
                 om_market_ladder_mark_dirty(worker, ladder_idx);
-                return ret;
+                if (ret != 0) {
+                    return ret;
+                }
             }
             return 0;
         }

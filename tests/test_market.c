@@ -122,6 +122,15 @@ static uint64_t test_marketable(const OmWalInsert *rec, uint16_t viewer_org, voi
     return rec->org == viewer_org ? 0 : rec->vol_remain;
 }
 
+/* Multi-org visibility: org 1's orders are visible to both org 2 and org 3 */
+static uint64_t test_multi_org_marketable(const OmWalInsert *rec, uint16_t viewer_org, void *ctx) {
+    (void)ctx;
+    if (rec->org == 1 && (viewer_org == 2 || viewer_org == 3)) {
+        return rec->vol_remain;
+    }
+    return 0;
+}
+
 START_TEST(test_market_worker_dealable) {
     OmMarket market;
     uint32_t org_to_worker[UINT16_MAX + 1U];
@@ -309,6 +318,86 @@ START_TEST(test_market_publish_combos) {
 }
 END_TEST
 
+/* Test that CANCEL affects ALL orgs that can see the order */
+START_TEST(test_market_multi_org_visibility) {
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) {
+        org_to_worker[i] = 0;
+    }
+    /* 3 orgs subscribed to product 0 */
+    OmMarketSubscription subs[3] = {
+        {.org_id = 1, .product_id = 0},
+        {.org_id = 2, .product_id = 0},
+        {.org_id = 3, .product_id = 0}
+    };
+    OmMarketConfig cfg = {
+        .max_products = 4,
+        .worker_count = 1,
+        .public_worker_count = 1,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
+        .subs = subs,
+        .sub_count = 3,
+        .expected_orders_per_worker = 4,
+        .expected_subscribers_per_product = 3,
+        .expected_price_levels = 4,
+        .top_levels = 2,
+        .dealable = test_multi_org_marketable,
+        .dealable_ctx = NULL
+    };
+
+    ck_assert_int_eq(om_market_init(&market, &cfg), 0);
+    OmMarketWorker *worker = om_market_worker(&market, 0);
+    ck_assert_ptr_nonnull(worker);
+
+    /* Insert order from org 1 - should be visible to both org 2 and org 3 */
+    OmWalInsert insert = {
+        .order_id = 300,
+        .price = 100,
+        .volume = 50,
+        .vol_remain = 50,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    ck_assert_int_eq(om_market_worker_process(worker, OM_WAL_INSERT, &insert), 0);
+
+    /* Verify org 2 sees the order */
+    uint64_t qty = 0;
+    ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 100, &qty), 0);
+    ck_assert_uint_eq(qty, 50);
+
+    /* Verify org 3 also sees the order */
+    ck_assert_int_eq(om_market_worker_get_qty(worker, 3, 0, OM_SIDE_BID, 100, &qty), 0);
+    ck_assert_uint_eq(qty, 50);
+
+    /* Org 1 should NOT see its own order (dealable returns 0) */
+    ck_assert_int_ne(om_market_worker_get_qty(worker, 1, 0, OM_SIDE_BID, 100, &qty), 0);
+
+    /* Clear dirty flags before testing CANCEL */
+    om_market_worker_clear_dirty(worker, 2, 0);
+    om_market_worker_clear_dirty(worker, 3, 0);
+
+    /* CANCEL - should remove qty from BOTH org 2 and org 3 */
+    OmWalCancel cancel = {
+        .order_id = 300,
+        .product_id = 0
+    };
+    ck_assert_int_eq(om_market_worker_process(worker, OM_WAL_CANCEL, &cancel), 0);
+
+    /* Both orgs should now see 0 qty at this price */
+    ck_assert_int_ne(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 100, &qty), 0);
+    ck_assert_int_ne(om_market_worker_get_qty(worker, 3, 0, OM_SIDE_BID, 100, &qty), 0);
+
+    /* Both ladders should be marked dirty */
+    ck_assert_int_eq(om_market_worker_is_dirty(worker, 2, 0), 1);
+    ck_assert_int_eq(om_market_worker_is_dirty(worker, 3, 0), 1);
+
+    om_market_destroy(&market);
+}
+END_TEST
+
 Suite* market_suite(void) {
     Suite *s = suite_create("market");
     TCase *tc_core = tcase_create("core");
@@ -317,6 +406,7 @@ Suite* market_suite(void) {
     tcase_add_test(tc_core, test_market_ring_wait_notify);
     tcase_add_test(tc_core, test_market_worker_dealable);
     tcase_add_test(tc_core, test_market_publish_combos);
+    tcase_add_test(tc_core, test_market_multi_org_visibility);
     suite_add_tcase(s, tc_core);
     return s;
 }
