@@ -36,14 +36,20 @@ typedef struct OmMarketOrderState {
     uint64_t remaining;
 } OmMarketOrderState;
 
-KHASH_MAP_INIT_INT64(om_market_price_map, uint64_t)
 KHASH_MAP_INIT_INT64(om_market_order_map, OmMarketOrderState)
 KHASH_MAP_INIT_INT(om_market_pair_map, uint32_t)
 KHASH_MAP_INIT_INT64(om_market_delta_map, int64_t)
 
+typedef struct OmMarketLevel {
+    uint64_t price;
+    uint64_t qty;
+} OmMarketLevel;
+
 typedef struct OmMarketLadder {
-    khash_t(om_market_price_map) *bid;
-    khash_t(om_market_price_map) *ask;
+    OmMarketLevel *bid_levels;      /**< Contiguous sorted array for bids (best first) */
+    OmMarketLevel *ask_levels;      /**< Contiguous sorted array for asks (best first) */
+    uint32_t bid_count;             /**< Actual populated bid levels */
+    uint32_t ask_count;             /**< Actual populated ask levels */
 } OmMarketLadder;
 
 typedef struct OmMarketDelta {
@@ -68,6 +74,7 @@ typedef struct OmMarketWorker {
     uint8_t *product_has_subs;
     uint32_t top_levels;
     OmMarketLadder *ladders;
+    OmMarketLevel *levels_block;    /**< Single contiguous block for all levels */
     uint8_t *ladder_dirty;
     khash_t(om_market_delta_map) **ladder_deltas;
     khash_t(om_market_pair_map) *pair_to_ladder;
@@ -81,6 +88,7 @@ typedef struct OmMarketPublicWorker {
     uint8_t *product_has_subs;
     uint32_t top_levels;
     OmMarketLadder *ladders;
+    OmMarketLevel *levels_block;    /**< Single contiguous block for all levels */
     uint8_t *dirty;
     khash_t(om_market_delta_map) **deltas;
     khash_t(om_market_order_map) *orders;
