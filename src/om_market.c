@@ -420,29 +420,59 @@ int om_market_init(OmMarket *market, const OmMarketConfig *config) {
             return ret;
         }
     }
+
+    uint8_t *public_products = calloc((size_t)config->max_products, sizeof(*public_products));
+    if (!public_products) {
+        free(buckets);
+        free(offsets);
+        free(counts);
+        om_market_destroy(market);
+        return -11;
+    }
+    for (uint32_t i = 0; i < config->sub_count; i++) {
+        uint16_t product_id = config->subs[i].product_id;
+        if (product_id < config->max_products) {
+            public_products[product_id] = 1U;
+        }
+    }
     for (uint32_t product_id = 0; product_id < config->max_products; product_id++) {
-        uint32_t worker_id = config->product_to_public_worker[product_id];
-        if (worker_id >= config->public_worker_count) {
+        if (!public_products[product_id]) {
             continue;
         }
-        market->public_workers[worker_id].product_has_subs[product_id] = 1U;
-        market->public_workers[worker_id].ladders[product_id].bid = kh_init(om_market_price_map);
-        market->public_workers[worker_id].ladders[product_id].ask = kh_init(om_market_price_map);
-        if (!market->public_workers[worker_id].ladders[product_id].bid ||
-            !market->public_workers[worker_id].ladders[product_id].ask) {
+        uint32_t worker_id = config->product_to_public_worker[product_id];
+        if (worker_id >= config->public_worker_count) {
+            free(public_products);
             free(buckets);
             free(offsets);
             free(counts);
             om_market_destroy(market);
-            return -11;
+            return -12;
         }
-        if (config->expected_price_levels > 0) {
-            kh_resize(om_market_price_map, market->public_workers[worker_id].ladders[product_id].bid,
-                      config->expected_price_levels);
-            kh_resize(om_market_price_map, market->public_workers[worker_id].ladders[product_id].ask,
-                      config->expected_price_levels);
+        market->public_workers[worker_id].product_has_subs[product_id] = 1U;
+        if (!market->public_workers[worker_id].ladders[product_id].bid &&
+            !market->public_workers[worker_id].ladders[product_id].ask) {
+            market->public_workers[worker_id].ladders[product_id].bid = kh_init(om_market_price_map);
+            market->public_workers[worker_id].ladders[product_id].ask = kh_init(om_market_price_map);
+            if (!market->public_workers[worker_id].ladders[product_id].bid ||
+                !market->public_workers[worker_id].ladders[product_id].ask) {
+                free(public_products);
+                free(buckets);
+                free(offsets);
+                free(counts);
+                om_market_destroy(market);
+                return -13;
+            }
+            if (config->expected_price_levels > 0) {
+                kh_resize(om_market_price_map,
+                          market->public_workers[worker_id].ladders[product_id].bid,
+                          config->expected_price_levels);
+                kh_resize(om_market_price_map,
+                          market->public_workers[worker_id].ladders[product_id].ask,
+                          config->expected_price_levels);
+            }
         }
     }
+    free(public_products);
 
     free(buckets);
     free(offsets);
