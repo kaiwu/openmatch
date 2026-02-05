@@ -5,7 +5,9 @@
       "Bash(ls:*)",
       "Bash(wc:*)",
       "Bash(grep:*)",
-      "Bash(git -C /home/kaiwu/Documents/gitea/openmatch log --oneline -20)"
+      "Bash(git -C /home/kaiwu/Documents/gitea/openmatch log --oneline -20)",
+      "Bash(ctest:*)",
+      "Bash(LD_PRELOAD=/usr/lib/libasan.so ctest:*)"
     ]
   }
 }

@@ -8,8 +8,11 @@ static bool om_market_is_power_of_two(size_t value) {
 }
 
 int om_market_ring_init(OmMarketRing *ring, const OmMarketRingConfig *config) {
-    if (!ring || !config || config->capacity == 0 || config->consumer_count == 0) {
+    if (!ring || !config) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (config->capacity == 0 || config->consumer_count == 0) {
+        return OM_ERR_INVALID_PARAM;
     }
     if (!om_market_is_power_of_two(config->capacity)) {
         return OM_ERR_RING_NOT_POW2;
@@ -70,7 +73,10 @@ void om_market_ring_destroy(OmMarketRing *ring) {
 }
 
 int om_market_ring_register_consumer(OmMarketRing *ring, uint32_t consumer_index) {
-    if (!ring || consumer_index >= ring->consumer_count) {
+    if (!ring) {
+        return OM_ERR_NULL_PARAM;
+    }
+    if (consumer_index >= ring->consumer_count) {
         return OM_ERR_RING_CONSUMER_ID;
     }
     atomic_store_explicit(&ring->consumer_tails[consumer_index], 0U, memory_order_release);
@@ -120,8 +126,11 @@ int om_market_ring_enqueue(OmMarketRing *ring, void *ptr) {
 }
 
 int om_market_ring_dequeue(OmMarketRing *ring, uint32_t consumer_index, void **out_ptr) {
-    if (!ring || !out_ptr || consumer_index >= ring->consumer_count) {
+    if (!ring || !out_ptr) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (consumer_index >= ring->consumer_count) {
+        return OM_ERR_RING_CONSUMER_ID;
     }
 
     uint64_t tail = atomic_load_explicit(&ring->consumer_tails[consumer_index],
@@ -142,8 +151,14 @@ int om_market_ring_dequeue_batch(OmMarketRing *ring,
                                 uint32_t consumer_index,
                                 void **out_ptrs,
                                 size_t max_count) {
-    if (!ring || !out_ptrs || max_count == 0 || consumer_index >= ring->consumer_count) {
+    if (!ring || !out_ptrs) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (max_count == 0) {
+        return OM_ERR_INVALID_PARAM;
+    }
+    if (consumer_index >= ring->consumer_count) {
+        return OM_ERR_RING_CONSUMER_ID;
     }
 
     uint64_t tail = atomic_load_explicit(&ring->consumer_tails[consumer_index],
@@ -167,8 +182,14 @@ int om_market_ring_dequeue_batch(OmMarketRing *ring,
 }
 
 int om_market_ring_wait(OmMarketRing *ring, uint32_t consumer_index, size_t min_batch) {
-    if (!ring || consumer_index >= ring->consumer_count || min_batch == 0) {
+    if (!ring) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (min_batch == 0) {
+        return OM_ERR_INVALID_PARAM;
+    }
+    if (consumer_index >= ring->consumer_count) {
+        return OM_ERR_RING_CONSUMER_ID;
     }
 
     pthread_mutex_lock(&ring->wait_mutex);

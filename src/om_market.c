@@ -1055,8 +1055,11 @@ int om_market_public_get_qty(const OmMarketPublicWorker *worker,
                              uint16_t side,
                              uint64_t price,
                              uint64_t *out_qty) {
-    if (!worker || !out_qty || !worker->ladders || product_id >= worker->max_products) {
+    if (!worker || !out_qty || !worker->ladders) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (product_id >= worker->max_products) {
+        return OM_ERR_OUT_OF_RANGE;
     }
     if (worker->product_has_subs && !worker->product_has_subs[product_id]) {
         return OM_ERR_NOT_SUBSCRIBED;
@@ -1156,8 +1159,11 @@ int om_market_worker_clear_deltas(OmMarketWorker *worker,
 int om_market_public_delta_count(const OmMarketPublicWorker *worker,
                                  uint16_t product_id,
                                  uint16_t side) {
-    if (!worker || !worker->deltas || product_id >= worker->max_products) {
+    if (!worker || !worker->deltas) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (product_id >= worker->max_products) {
+        return OM_ERR_OUT_OF_RANGE;
     }
     if (worker->product_has_subs && !worker->product_has_subs[product_id]) {
         return OM_ERR_NOT_SUBSCRIBED;
@@ -1172,8 +1178,14 @@ int om_market_public_copy_deltas(const OmMarketPublicWorker *worker,
                                  uint16_t side,
                                  OmMarketDelta *out,
                                  size_t max) {
-    if (!worker || !out || max == 0 || !worker->deltas || product_id >= worker->max_products) {
+    if (!worker || !out || !worker->deltas) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (max == 0) {
+        return OM_ERR_INVALID_PARAM;
+    }
+    if (product_id >= worker->max_products) {
+        return OM_ERR_OUT_OF_RANGE;
     }
     if (worker->product_has_subs && !worker->product_has_subs[product_id]) {
         return OM_ERR_NOT_SUBSCRIBED;
@@ -1198,8 +1210,11 @@ int om_market_public_copy_deltas(const OmMarketPublicWorker *worker,
 int om_market_public_clear_deltas(OmMarketPublicWorker *worker,
                                   uint16_t product_id,
                                   uint16_t side) {
-    if (!worker || !worker->deltas || product_id >= worker->max_products) {
+    if (!worker || !worker->deltas) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (product_id >= worker->max_products) {
+        return OM_ERR_OUT_OF_RANGE;
     }
     if (worker->product_has_subs && !worker->product_has_subs[product_id]) {
         return OM_ERR_NOT_SUBSCRIBED;
@@ -1249,8 +1264,14 @@ int om_market_public_copy_full(const OmMarketPublicWorker *worker,
                                uint16_t side,
                                OmMarketDelta *out,
                                size_t max) {
-    if (!worker || !out || max == 0 || product_id >= worker->max_products) {
+    if (!worker || !out) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (max == 0) {
+        return OM_ERR_INVALID_PARAM;
+    }
+    if (product_id >= worker->max_products) {
+        return OM_ERR_OUT_OF_RANGE;
     }
     if (worker->product_has_subs && !worker->product_has_subs[product_id]) {
         return OM_ERR_NOT_SUBSCRIBED;
@@ -1300,8 +1321,11 @@ int om_market_worker_clear_dirty(OmMarketWorker *worker,
 }
 
 int om_market_public_is_dirty(const OmMarketPublicWorker *worker, uint16_t product_id) {
-    if (!worker || !worker->dirty || product_id >= worker->max_products) {
+    if (!worker || !worker->dirty) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (product_id >= worker->max_products) {
+        return OM_ERR_OUT_OF_RANGE;
     }
     if (worker->product_has_subs && !worker->product_has_subs[product_id]) {
         return OM_ERR_NOT_SUBSCRIBED;
@@ -1310,8 +1334,11 @@ int om_market_public_is_dirty(const OmMarketPublicWorker *worker, uint16_t produ
 }
 
 int om_market_public_clear_dirty(OmMarketPublicWorker *worker, uint16_t product_id) {
-    if (!worker || !worker->dirty || product_id >= worker->max_products) {
+    if (!worker || !worker->dirty) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (product_id >= worker->max_products) {
+        return OM_ERR_OUT_OF_RANGE;
     }
     if (worker->product_has_subs && !worker->product_has_subs[product_id]) {
         return OM_ERR_NOT_SUBSCRIBED;

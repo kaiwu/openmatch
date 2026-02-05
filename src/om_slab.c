@@ -33,8 +33,11 @@ OmSlabSlot *om_slot_from_idx(const OmDualSlab *slab, uint32_t idx) {
 }
 
 int om_slab_init(OmDualSlab *slab, const OmSlabConfig *config) {
-    if (!slab || !config || config->total_slots == 0) {
+    if (!slab || !config) {
         return OM_ERR_NULL_PARAM;
+    }
+    if (config->total_slots == 0) {
+        return OM_ERR_INVALID_PARAM;
     }
 
     memset(slab, 0, sizeof(OmDualSlab));
