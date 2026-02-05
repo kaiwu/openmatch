@@ -11,11 +11,20 @@
 /**
  * @file om_market.h
  * @brief OpenMarket public API
+ *
+ * Uses slab + intrusive queue architecture:
+ * - Fixed-size 64-byte price level slots in contiguous slab
+ * - Q0: free list for slab allocation
+ * - Q1: sorted price ladder (bids descending, asks ascending)
+ * - uint32_t indices instead of pointers (cache-friendly)
+ * - Hash map for O(1) price → slot lookup
  */
 
 #define OM_MARKET_VERSION_MAJOR 1U
 #define OM_MARKET_VERSION_MINOR 0U
 #define OM_MARKET_VERSION_PATCH 0U
+
+#define OM_MARKET_SLOT_NULL UINT32_MAX
 
 typedef struct OmMarketVersion {
     uint32_t major;
@@ -39,19 +48,71 @@ typedef struct OmMarketOrderState {
 KHASH_MAP_INIT_INT64(om_market_order_map, OmMarketOrderState)
 KHASH_MAP_INIT_INT(om_market_pair_map, uint32_t)
 KHASH_MAP_INIT_INT64(om_market_delta_map, int64_t)
+KHASH_MAP_INIT_INT64(om_market_level_map, uint32_t)  /**< price → slot_idx */
+
+/**
+ * Price level slot - exactly 64 bytes (1 cache line).
+ *
+ * Each slot is either in Q0 (free list) or Q1 (price ladder), never both.
+ * Links could be unioned but kept separate for future expansion.
+ */
+typedef struct OmMarketLevelSlot {
+    /* Q0: free list links (8 bytes) */
+    uint32_t q0_next;           /**< next free slot */
+    uint32_t q0_prev;           /**< prev free slot */
+
+    /* Q1: price ladder links (8 bytes) */
+    uint32_t q1_next;           /**< next slot (worse price) */
+    uint32_t q1_prev;           /**< prev slot (better price) */
+
+    /* Data (16 bytes) */
+    uint64_t price;
+    uint64_t qty;
+
+    /* Metadata (8 bytes) */
+    uint32_t ladder_idx;        /**< which ladder owns this slot */
+    uint16_t side;              /**< OM_SIDE_BID or OM_SIDE_ASK */
+    uint16_t flags;             /**< reserved */
+
+    /* Padding to 64 bytes (24 bytes) */
+    uint8_t reserved[24];
+} OmMarketLevelSlot;            /* 64 bytes exactly */
+
+/**
+ * Slab allocator for price level slots.
+ * Q0 is the free list - slots are allocated from head, freed to head.
+ */
+typedef struct OmMarketLevelSlab {
+    OmMarketLevelSlot *slots;   /**< contiguous array, 64-byte aligned */
+    uint32_t capacity;          /**< total slots */
+    uint32_t q0_head;           /**< free list head */
+    uint32_t q0_tail;           /**< free list tail */
+    uint32_t free_count;        /**< slots available */
+} OmMarketLevelSlab;
 
 typedef struct OmMarketLevel {
     uint64_t price;
     uint64_t qty;
 } OmMarketLevel;
 
+/**
+ * Price ladder using intrusive Q1 queue.
+ * Bids: sorted descending (head = best/highest price)
+ * Asks: sorted ascending (head = best/lowest price)
+ */
 typedef struct OmMarketLadder {
-    OmMarketLevel *bid_levels;      /**< Contiguous sorted array for bids (best first) */
-    OmMarketLevel *ask_levels;      /**< Contiguous sorted array for asks (best first) */
-    uint32_t bid_count;             /**< Actual populated bid levels */
-    uint32_t ask_count;             /**< Actual populated ask levels */
-    uint32_t bid_capacity;          /**< Allocated capacity for bids */
-    uint32_t ask_capacity;          /**< Allocated capacity for asks */
+    /* Q1 heads/tails for bid side */
+    uint32_t bid_head;          /**< best bid (highest price) */
+    uint32_t bid_tail;          /**< worst bid (lowest price) */
+    uint32_t bid_count;         /**< active bid levels */
+
+    /* Q1 heads/tails for ask side */
+    uint32_t ask_head;          /**< best ask (lowest price) */
+    uint32_t ask_tail;          /**< worst ask (highest price) */
+    uint32_t ask_count;         /**< active ask levels */
+
+    /* O(1) price lookup */
+    khash_t(om_market_level_map) *price_to_slot;
 } OmMarketLadder;
 
 typedef struct OmMarketDelta {
@@ -62,6 +123,10 @@ typedef struct OmMarketDelta {
 
 typedef uint64_t (*OmMarketDealableFn)(const OmWalInsert *rec, uint16_t viewer_org, void *ctx);
 
+/**
+ * Private worker - sharded by org.
+ * Each worker owns its own slab (no cross-worker sharing).
+ */
 typedef struct OmMarketWorker {
     uint32_t worker_id;
     uint16_t max_products;
@@ -75,9 +140,9 @@ typedef struct OmMarketWorker {
     size_t ladder_index_stride;
     uint8_t *product_has_subs;
     uint32_t top_levels;
-    uint32_t initial_capacity;      /**< Initial capacity per side for ladder arrays */
-    OmMarketLadder *ladders;        /**< Each ladder owns its own dynamic arrays */
-    uint8_t *ladder_dirty;
+    OmMarketLevelSlab slab;         /**< Worker-owned slab for price level slots */
+    OmMarketLadder *ladders;        /**< Per-subscription ladders (Q1 queue heads) */
+    uint8_t *ladder_dirty;          /**< 64-byte aligned dirty flags */
     khash_t(om_market_delta_map) **ladder_deltas;
     khash_t(om_market_pair_map) *pair_to_ladder;
     khash_t(om_market_order_map) **orders;
@@ -85,13 +150,17 @@ typedef struct OmMarketWorker {
     void *dealable_ctx;
 } OmMarketWorker;
 
+/**
+ * Public worker - sharded by product.
+ * Each worker owns its own slab (no cross-worker sharing).
+ */
 typedef struct OmMarketPublicWorker {
     uint16_t max_products;
     uint8_t *product_has_subs;
     uint32_t top_levels;
-    uint32_t initial_capacity;      /**< Initial capacity per side for ladder arrays */
-    OmMarketLadder *ladders;        /**< Each ladder owns its own dynamic arrays */
-    uint8_t *dirty;
+    OmMarketLevelSlab slab;         /**< Worker-owned slab for price level slots */
+    OmMarketLadder *ladders;        /**< Per-product ladders (Q1 queue heads) */
+    uint8_t *dirty;                 /**< 64-byte aligned dirty flags */
     khash_t(om_market_delta_map) **deltas;
     khash_t(om_market_order_map) *orders;
 } OmMarketPublicWorker;

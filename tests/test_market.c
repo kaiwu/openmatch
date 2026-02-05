@@ -5,6 +5,15 @@
 #include "openmarket/om_market.h"
 #include "openmatch/om_error.h"
 
+START_TEST(test_market_struct_sizes) {
+    /* Verify OmMarketLevelSlot is exactly 64 bytes (1 cache line) */
+    ck_assert_uint_eq(sizeof(OmMarketLevelSlot), 64);
+
+    /* Verify OM_MARKET_SLOT_NULL is UINT32_MAX */
+    ck_assert_uint_eq(OM_MARKET_SLOT_NULL, UINT32_MAX);
+}
+END_TEST
+
 START_TEST(test_market_ring_basic) {
     OmMarketRing ring;
     OmMarketRingConfig config = {
@@ -659,6 +668,7 @@ END_TEST
 Suite* market_suite(void) {
     Suite *s = suite_create("market");
     TCase *tc_core = tcase_create("core");
+    tcase_add_test(tc_core, test_market_struct_sizes);
     tcase_add_test(tc_core, test_market_ring_basic);
     tcase_add_test(tc_core, test_market_ring_batch);
     tcase_add_test(tc_core, test_market_ring_wait_notify);
@@ -668,6 +678,7 @@ Suite* market_suite(void) {
     tcase_add_test(tc_core, test_market_dynamic_ladder);
     tcase_add_test(tc_core, test_market_dynamic_ladder_ask);
     tcase_add_test(tc_core, test_market_dynamic_ladder_match);
+
     suite_add_tcase(s, tc_core);
     return s;
 }

@@ -8,7 +8,11 @@
       "Bash(git -C /home/kaiwu/Documents/gitea/openmatch log --oneline -20)",
       "Bash(ctest:*)",
       "Bash(LD_PRELOAD=/usr/lib/libasan.so ctest:*)",
-      "Bash(LD_PRELOAD=/usr/lib/libasan.so ./tests/test_runner:*)"
+      "Bash(LD_PRELOAD=/usr/lib/libasan.so ./tests/test_runner:*)",
+      "Bash(make:*)",
+      "Bash(LD_PRELOAD=/usr/lib/libasan.so ./test_runner:*)",
+      "Bash(gcc:*)",
+      "Bash(/tmp/check_size:*)"
     ]
   }
 }

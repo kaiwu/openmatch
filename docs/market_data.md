@@ -7,7 +7,7 @@ This document describes how OpenMarket consumes WAL records and builds
 
 - **Public ladder**: total remaining quantity at each price level for a product.
 - **Private ladder**: dealable remaining quantity per org at each price level.
-- **Top-N**: the top `N` price levels published per side (bid/ask). See "Dynamic Ladder" below.
+- **Top-N**: the top `N` price levels published per side (bid/ask).
 - **Dealable callback**: `uint64_t dealable(const OmWalInsert *rec, uint16_t viewer_org, void *ctx)`
   returns the maximum dealable quantity for an org at insert time (0 = not dealable).
 
@@ -16,89 +16,165 @@ This document describes how OpenMarket consumes WAL records and builds
 - **Private workers** are **sharded by org**.
 - **Public workers** are **sharded by product** (via `product_to_public_worker`).
 - Private and public workers can consume the **same** WAL stream or different streams.
-- Each worker maintains its own ladders and order maps (no cross-worker writes).
+- Each worker maintains its own slab, ladders, and order maps (no cross-worker writes).
 
-## Memory Layout
+## Memory Architecture: Slab + Intrusive Queue
 
-### Price Level Structure (16 bytes)
+OpenMarket uses the same architectural pattern as OpenMatch:
+- **Slab allocator** for fixed-size price level slots
+- **Intrusive queues** linking slots together (no external node allocation)
+- **uint32_t indices** instead of pointers (fits more in cache line)
+- **Hash map** for O(1) price → slot lookup
+
+### Price Level Slot (64 bytes = 1 cache line)
 
 ```c
-typedef struct OmMarketLevel {
-    uint64_t price;   // 8 bytes
-    uint64_t qty;     // 8 bytes
-} OmMarketLevel;
+#define OM_MARKET_SLOT_NULL UINT32_MAX
+
+typedef struct OmMarketLevelSlot {
+    // Q0: free list links (8 bytes)
+    uint32_t q0_next;           // next free slot
+    uint32_t q0_prev;           // prev free slot
+
+    // Q1: price ladder links (8 bytes)
+    uint32_t q1_next;           // next slot (worse price)
+    uint32_t q1_prev;           // prev slot (better price)
+
+    // Data (16 bytes)
+    uint64_t price;
+    uint64_t qty;
+
+    // Metadata (8 bytes)
+    uint32_t ladder_idx;        // which ladder owns this slot
+    uint16_t side;              // OM_SIDE_BID or OM_SIDE_ASK
+    uint16_t flags;             // reserved
+
+    // Padding to 64 bytes (24 bytes)
+    uint8_t reserved[24];
+} OmMarketLevelSlot;            // 64 bytes exactly
+```
+
+### Queue Definitions
+
+| Queue | Purpose | Links Used | When Active |
+|-------|---------|------------|-------------|
+| **Q0** | Free list (slab internal) | q0_next, q0_prev | Slot is free |
+| **Q1** | Price ladder (sorted) | q1_next, q1_prev | Slot is active |
+
+A slot is either in Q0 (free) or Q1 (active), never both. The links could be
+unioned, but keeping them separate allows future expansion (e.g., additional
+queues for LRU eviction or time-ordered tracking).
+
+### Slab Structure
+
+```c
+typedef struct OmMarketLevelSlab {
+    OmMarketLevelSlot *slots;   // contiguous array, 64-byte aligned
+    uint32_t capacity;          // total slots
+    uint32_t q0_head;           // free list head
+    uint32_t q0_tail;           // free list tail
+    uint32_t free_count;        // slots available
+} OmMarketLevelSlab;
+```
+
+### Ladder Structure (Q1 Queue Heads)
+
+```c
+KHASH_MAP_INIT_INT64(om_level_map, uint32_t)  // price → slot_idx
 
 typedef struct OmMarketLadder {
-    OmMarketLevel *bid_levels;  // dynamic sorted array for bids
-    OmMarketLevel *ask_levels;  // dynamic sorted array for asks
-    uint32_t bid_count;         // actual populated levels
-    uint32_t ask_count;
-    uint32_t bid_capacity;      // allocated capacity
-    uint32_t ask_capacity;
+    // Q1 heads/tails for bid side
+    uint32_t bid_head;          // best bid (highest price)
+    uint32_t bid_tail;          // worst bid (lowest price)
+    uint32_t bid_count;         // active bid levels
+
+    // Q1 heads/tails for ask side
+    uint32_t ask_head;          // best ask (lowest price)
+    uint32_t ask_tail;          // worst ask (highest price)
+    uint32_t ask_count;         // active ask levels
+
+    // O(1) price lookup
+    khash_t(om_level_map) *price_to_slot;
 } OmMarketLadder;
 ```
 
-### Dynamic Ladder Design
+## Worker Memory Layout
 
-Each ladder maintains a **dynamic sorted array** that tracks **ALL price levels** (not just top-N):
+**Each worker owns its own slab** - no sharing between workers.
 
-- Arrays are preallocated with `expected_price_levels` capacity
-- Arrays grow dynamically (2x growth factor) when capacity is exceeded
-- Top-N filtering happens **only at publish time**, not at insert time
-- This ensures prices that drop out of top-N can re-enter when better prices are removed
+### Private Worker
 
 ```
-Initial allocation per ladder (bid or ask side):
-┌──────────────────────────────────────────────────┐
-│ level[0] │ level[1] │ level[2] │ ... │ level[N-1] │ (unused capacity)
-└──────────────────────────────────────────────────┘
-     ↑ best                             ↑ worst
+┌─────────────────────────────────────────────────────────────────┐
+│ OmMarketWorker                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│ slab: OmMarketLevelSlab                                         │
+│   └─ slots[0..capacity-1]  (64-byte aligned, contiguous)        │
+│                                                                 │
+│ ladders[0]: (org0, prod0)                                       │
+│   ├─ bid: head ──→ slot[5] ──→ slot[12] ──→ slot[3] ──→ NULL   │
+│   │        (100)      (95)        (90)                          │
+│   ├─ ask: head ──→ slot[8] ──→ slot[2] ──→ NULL                │
+│   │        (101)      (105)                                     │
+│   └─ price_to_slot: {100→5, 95→12, 90→3, 101→8, 105→2}         │
+│                                                                 │
+│ ladders[1]: (org0, prod1)                                       │
+│   └─ ...                                                        │
+│                                                                 │
+│ orders[org_idx]: khash order_id → OmMarketOrderState            │
+│ ladder_dirty[]: 64-byte aligned flags                           │
+│ ladder_deltas[]: delta tracking hash maps                       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Worker Memory Layout
-
-Each ladder owns its **own separate dynamic arrays**:
+### Public Worker
 
 ```
-Private Worker:
-  ladders[0]: bid_levels -> [dynamically allocated]
-              ask_levels -> [dynamically allocated]
-  ladders[1]: bid_levels -> [dynamically allocated]
-              ask_levels -> [dynamically allocated]
-  ...
-  ladder_dirty: aligned_alloc(64, sub_count)  // 64-byte aligned
-
-Public Worker:
-  ladders[0]: bid_levels -> [dynamically allocated]
-              ask_levels -> [dynamically allocated]
-  ladders[1]: bid_levels -> [dynamically allocated]
-              ask_levels -> [dynamically allocated]
-  ...
-  dirty: aligned_alloc(64, max_products)  // 64-byte aligned
+┌─────────────────────────────────────────────────────────────────┐
+│ OmMarketPublicWorker                                            │
+├─────────────────────────────────────────────────────────────────┤
+│ slab: OmMarketLevelSlab                                         │
+│   └─ slots[0..capacity-1]  (64-byte aligned, contiguous)        │
+│                                                                 │
+│ ladders[prod0]:                                                 │
+│   ├─ bid: head ──→ slot[1] ──→ slot[7] ──→ ...                 │
+│   ├─ ask: head ──→ slot[4] ──→ slot[9] ──→ ...                 │
+│   └─ price_to_slot: {...}                                       │
+│                                                                 │
+│ ladders[prod1]:                                                 │
+│   └─ ...                                                        │
+│                                                                 │
+│ orders: khash order_id → OmMarketOrderState                     │
+│ dirty[]: 64-byte aligned flags                                  │
+│ deltas[]: delta tracking hash maps                              │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### False Sharing Prevention
+## Operations
 
-Each worker (private and public) has **completely separate memory allocations**:
-- Per-ladder arrays are owned exclusively by that ladder
-- `ladder_dirty` / `dirty` flags are 64-byte aligned, owned exclusively by one worker
-- No shared counters or flags in the hot path between workers
+### Slab Operations
 
-### Benefits of Dynamic Arrays
+| Operation | Steps | Cost |
+|-----------|-------|------|
+| **Alloc** | Pop from Q0 head | O(1) |
+| **Free** | Push to Q0 head | O(1) |
 
-1. **Correctness**: Prices outside top-N at insert time can become top-N later when other prices are removed.
-2. **Cache efficiency**: Sorted arrays provide sequential access during publish.
-3. **Simple logic**: No promotion scanning needed - all prices are tracked.
-4. **Predictable publish**: `copy_full(max=N)` always returns exactly top-N in O(N) time.
+### Ladder Operations
 
-### Sorted Array Operations
+| Operation | Steps | Cost |
+|-----------|-------|------|
+| **Add qty at price** | 1. Hash lookup price→slot<br>2. If found: `slot.qty += qty`<br>3. If not: alloc slot, find position in Q1, link | O(1) lookup, O(L) insert position |
+| **Sub qty at price** | 1. Hash lookup price→slot<br>2. `slot.qty -= qty`<br>3. If qty==0: unlink from Q1, free to slab, remove from hash | O(1) |
+| **Get qty at price** | Hash lookup price→slot, return qty | O(1) |
+| **Publish top-N** | Walk Q1 from head, copy N entries | O(N), cache-friendly |
 
-Price levels are maintained as **sorted arrays** (bids descending, asks ascending):
+### Finding Insert Position (Q1)
 
-- **Insert**: O(log N) binary search + O(N) memmove. N is typically small (10-50 levels per product/side).
-- **Remove**: O(log N) search + O(N) memmove.
-- **Lookup**: O(log N) binary search in L1 cache.
-- **Publish**: O(top_levels) sequential copy - **cache optimal**.
+For bids (descending by price): walk from head until `slot.price < new_price`.
+For asks (ascending by price): walk from head until `slot.price > new_price`.
+
+Optimization: If new price is likely near best (common case), start from head.
+If new price is likely worse than current worst, start from tail.
 
 ## Record Flow
 
@@ -113,15 +189,15 @@ Price levels are maintained as **sorted arrays** (bids descending, asks ascendin
 **Public (product-level)**
 
 - For the public worker assigned to the product:
-  - Add `vol_remain` to the public ladder at `(product_id, side, price)`
-  - **Only if** `price` qualifies for the current top-N range for that side.
+  - Hash lookup price in ladder
+  - If found: add `vol_remain` to existing slot
+  - If not found: alloc slot from slab, insert into Q1 at correct position
 
 **Private (org-level)**
 
 - For each subscribed org in the **private** worker for this product:
   - Call `dealable(rec, viewer_org)` -> `dq`
-  - If `dq > 0`, add `min(vol_remain, dq)` to the org's private ladder
-  - **Only if** `price` qualifies for the current top-N range
+  - If `dq > 0`: add `min(vol_remain, dq)` to the org's ladder (same as public)
 
 The order is stored in per-org order maps and in the public order map so later
 records can resolve price/product/remaining without rescanning the book.
@@ -131,27 +207,20 @@ records can resolve price/product/remaining without rescanning the book.
 **Public**
 
 - Lookup `order_id` in the public order map.
-- If present and active, subtract remaining quantity from the public ladder
-  at the stored `(product_id, side, price)`.
+- If present and active, subtract remaining quantity from the ladder.
+- If qty reaches 0: unlink slot from Q1, free to slab, remove from hash.
 
 **Private**
 
 - Each worker checks **all** its per-org order maps.
 - For each org where the order exists, subtract remaining from that org's ladder.
-- This ensures orders visible to multiple orgs are correctly removed from all.
-
-**How a worker decides to process**
-
-- A worker processes a cancel/deactivate **only if** the `order_id` exists in
-  one of its per-org order maps (private), or in its public order map.
-- If not found, the record is ignored by that worker (no subscription means no state).
 
 ### ACTIVATE (OmWalActivate)
 
 **Public**
 
 - Lookup in public order map; if inactive and remaining > 0, re-add remaining
-  to public ladder.
+  to ladder (alloc slot if price level was removed).
 
 **Private**
 
@@ -161,21 +230,28 @@ records can resolve price/product/remaining without rescanning the book.
 
 **Public**
 
-- Lookup maker order in public order map, subtract matched quantity.
+- Lookup maker order in public order map, subtract matched quantity from ladder.
 
 **Private**
 
 - For each per-org order map that contains the maker order, subtract matched quantity.
 
-## Top-N Enforcement (At Publish Time)
+## Top-N Publishing
 
-- **ALL price levels** are aggregated and stored in the dynamic sorted arrays.
-- Top-N filtering happens **only at publish time**, not at insert/remove time.
-- When publishing:
-  - Call `om_market_*_copy_full(worker, ..., out, top_levels)` to get the top N levels.
-  - The sorted array is already in best-to-worst order, so copy is O(N).
-  - Prices outside the top N are automatically excluded by the `max` parameter.
-- This design ensures prices can move in and out of top-N dynamically as the order book changes.
+- **All price levels** are tracked in the ladder (Q1 linked list).
+- Top-N filtering happens **at publish time** by walking Q1 from head.
+- Since Q1 is sorted (best first), the first N slots are the top-N.
+
+```c
+// Publish top-N bids
+uint32_t slot_idx = ladder->bid_head;
+for (int i = 0; i < top_levels && slot_idx != OM_MARKET_SLOT_NULL; i++) {
+    OmMarketLevelSlot *slot = &slab->slots[slot_idx];
+    out[i].price = slot->price;
+    out[i].qty = slot->qty;
+    slot_idx = slot->q1_next;
+}
+```
 
 ## Publish Cadence
 
@@ -186,136 +262,104 @@ records can resolve price/product/remaining without rescanning the book.
 **Concrete publish loop (public):**
 
 1. For each product assigned to the public worker, check `om_market_public_is_dirty()`.
-2. If dirty, publish **delta** or **full** (see below) and then clear:
-   - Delta: `om_market_public_clear_deltas()`
-   - Full: `om_market_public_clear_dirty()`
+2. If dirty, publish **delta** or **full** (see below) and then clear.
 3. If not dirty, publish cached data (or skip) based on your cadence requirements.
 
 **Concrete publish loop (private):**
 
 1. For each subscribed `(org_id, product_id)` pair in the worker, check
    `om_market_worker_is_dirty()`.
-2. If dirty, publish **delta** or **full** (see below) and then clear:
-   - Delta: `om_market_worker_clear_deltas()`
-   - Full: `om_market_worker_clear_dirty()`
+2. If dirty, publish **delta** or **full** (see below) and then clear.
 3. If not dirty, publish cached data (or skip) based on your cadence requirements.
 
 ## Delta vs Full Snapshot Publishing
 
-- **Delta publishing (default):**
+- **Delta publishing:**
   - Only changed price levels are published each tick.
   - Backed by per-ladder delta maps (price -> delta).
-  - Lowest bandwidth and fastest publish when changes are sparse.
-  - **Public delta steps:**
-    1. `count = om_market_public_delta_count(worker, product_id, side)`
-    2. `n = om_market_public_copy_deltas(worker, product_id, side, out, max)`
-    3. Serialize `out[0..n)` and publish to subscribers of `product_id`.
-    4. `om_market_public_clear_deltas(worker, product_id, side)`
-  - **Private delta steps:**
-    1. `count = om_market_worker_delta_count(worker, org_id, product_id, side)`
-    2. `n = om_market_worker_copy_deltas(worker, org_id, product_id, side, out, max)`
-    3. Serialize `out[0..n)` and publish to that org.
-    4. `om_market_worker_clear_deltas(worker, org_id, product_id, side)`
+  - Lowest bandwidth when changes are sparse.
 
-- **Full snapshot publishing (cache-optimal):**
+- **Full snapshot publishing:**
   - Publishes top-N price levels every tick.
-  - Use `om_market_worker_copy_full` / `om_market_public_copy_full` APIs.
-  - **Pass `top_levels` as the `max` parameter** to get exactly top-N levels.
-  - **Optimized for contiguous memory**: simple sequential array copy.
-  - Higher bandwidth but simpler consumers and predictable latency.
-  - **Public full steps:**
-    1. `n = om_market_public_copy_full(worker, product_id, side, out, top_levels)`
-    2. Serialize `out[0..n)` and publish to subscribers of `product_id`.
-    3. `om_market_public_clear_dirty(worker, product_id)`
-  - **Private full steps:**
-    1. `n = om_market_worker_copy_full(worker, org_id, product_id, side, out, top_levels)`
-    2. Serialize `out[0..n)` and publish to that org.
-    3. `om_market_worker_clear_dirty(worker, org_id, product_id)`
+  - Walk Q1 from head, copy first N slots.
+  - **Cache optimal**: sequential slot access if slots are allocated contiguously.
 
-## Performance Estimate (Order of Magnitude)
+## Performance Characteristics
 
-### Dynamic Sorted Array Performance
+### Slab + Intrusive Queue Performance
 
-| Operation | Hash-based | Dynamic Sorted Array | Notes |
-|-----------|------------|----------------------|-------|
-| copy_full (publish) | ~200-500 ns | ~20-50 ns | **Sequential copy, cache optimal** |
-| Price lookup | ~15-30 ns | ~10-20 ns | Binary search in L1 cache |
-| Insert | ~20-40 ns | ~30-80 ns | O(log N) search + O(N) memmove |
-| Remove | ~15-25 ns | ~20-50 ns | O(log N) search + O(N) memmove |
-| Grow array | N/A | ~50-200 ns | Amortized O(1), rare |
+| Operation | Cost | Notes |
+|-----------|------|-------|
+| Alloc/Free slot | O(1) | Q0 push/pop |
+| Add qty (existing price) | O(1) | Hash lookup + increment |
+| Add qty (new price) | O(1) + O(L) | Hash miss + Q1 insert position |
+| Sub qty | O(1) | Hash lookup + decrement (+ free if zero) |
+| Publish top-N | O(N) | Walk Q1, sequential memory access |
+| Get qty at price | O(1) | Hash lookup |
 
-The biggest win is in **full snapshot publishing**, which is a simple
-sequential copy of contiguous memory. Insert/remove are slightly slower
-due to memmove, but N is typically small (10-50 levels per product/side).
+Where L = number of price levels in the ladder.
 
-### Refactor impact (public/private split)
+### Comparison with Previous Designs
 
-The public path is now **product-sharded**, so each WAL record updates **one** public ladder
-instead of fanning out to many orgs. The private path remains **org-sharded** and still does
-per-org fan-out for subscribed products. Practically:
+| Design | Insert | Remove | Publish | Memory |
+|--------|--------|--------|---------|--------|
+| Hash map only | O(1) | O(1) | O(P log P) sort | Unbounded |
+| Dynamic sorted array | O(L) memmove | O(L) memmove | O(N) copy | Unbounded |
+| **Slab + intrusive queue** | O(1) + O(L) link | O(1) | O(N) walk | **Bounded** |
 
-- **Public cost per record** ~ `C_pub` (one order lookup + one ladder update).
-- **Private cost per record** ~ `(avg_orgs_per_product / W_private) * C_priv`.
+Key advantages of slab + intrusive queue:
+1. **Bounded memory**: Preallocated slab, no dynamic allocation during operation.
+2. **No memmove**: Insert/remove just update a few indices.
+3. **Cache-friendly publish**: Walk contiguous slots (if allocated sequentially).
+4. **O(1) price lookup**: Hash map for direct access.
 
-Total aggregation time is dominated by the private path unless the public worker count is too
-small. Choose `W_public` so that `(R / W_public) * C_pub` stays below your publish window.
+### Insert Position Optimization
 
-Let:
+Finding insert position is O(L) worst case, but can be optimized:
+- **Best price heuristic**: Most inserts are near the best price; start from head.
+- **Worst price check**: If new price is worse than tail, insert at tail (O(1)).
+- **Skip list**: For very deep ladders (L > 100), add skip pointers.
 
-- `O` = number of orgs
-- `P` = number of products (max 65,535)
-- `S` = subscriptions per org
-- `W` = number of worker threads
-- `R` = WAL records/sec
+## Slab Sizing
 
-Total subscriptions ~ `O * S`. Average orgs per product ~ `(O * S) / P`.
-Per **private** worker, average orgs per product ~ `(O * S) / (P * W_private)`.
+Each worker's slab should be sized for:
+
+```
+capacity = num_ladders * expected_levels_per_side * 2 (bid + ask) * safety_factor
+```
 
 Example:
+- Private worker with 1000 subscriptions
+- Expected 50 price levels per side
+- Safety factor 1.5
 
-- `O = 5,000`
-- `P = 65,535`
-- `S = 10,000`
+```
+capacity = 1000 * 50 * 2 * 1.5 = 150,000 slots
+memory = 150,000 * 64 bytes = 9.6 MB per private worker
+```
 
-Total subs ~ 50,000,000 -> avg orgs per product ~ **~763**.
-Per worker: **~763 / W** orgs per product.
+## False Sharing Prevention
 
-If per-org update cost (dealable + ladder update) is ~0.2-0.5us (improved with contiguous memory):
-
-- Per record **private** cost per worker ~ `(763 / W_private) * (0.2-0.5us)`
-- Public cost per worker ~ `(R / W_public) * C_pub`
-- Target is **2x realtime** (process 1s of WAL in <=0.5s)
-
-For **R = 1,000,000 records/sec** (rough), the **minimum private** worker threads needed to meet
-the <=0.5s aggregation window are approximately **3-10 workers** (improved from 4-13 with hash-based).
-
-This range assumes per-org update cost of ~0.2-0.5us and the subscription
-distribution above; it is an order-of-magnitude estimate.
-
-## Performance Bottlenecks
-
-1. **Per-org fan-out**: Inserts that must evaluate many orgs per product dominate CPU.
-2. **Dealable callback cost**: Any heavy logic here multiplies by org fan-out.
-3. **Order map lookups**: Order maps are still hash-based; cache misses possible for large maps.
-4. **Publication serialization**: Even if no changes, formatting large snapshots can dominate.
-5. **Delta map overhead**: Delta tracking still uses hash maps (sparse updates).
+- Each worker has its **own slab** (no sharing).
+- Dirty flags are 64-byte aligned.
+- No shared counters in the hot path.
 
 ## Optimization Suggestions
 
-1. **Set `expected_price_levels` appropriately**: This controls initial capacity for ladder arrays.
-   Set it to the typical number of distinct price levels per product/side (e.g., 20-50).
-2. **Keep top-N small** (e.g., 5-20) for publishing. The ladder tracks all prices, but publish
-   only copies top-N which affects serialization bandwidth.
-3. **Make dealable fast**: simple bit checks, precomputed org/product rules, no I/O.
-4. **Batch WAL processing**: process 256-1024 records per batch to amortize overhead.
-5. **Preallocate order maps**: size order maps to avoid rehash/resize.
-6. **Use dense arrays if order_id is dense** for public order map (faster than hash).
-7. **Dirty-flag publishing**: skip serialization if no change; still publish cached snapshot.
-8. **Right-size public workers**: size `W_public` so each handles a stable product set; avoid
-   a single public worker becoming a hotspot.
-9. **Worker isolation**: each worker's dirty flags are 64-byte aligned and separately
-   allocated to prevent false sharing between worker threads.
-10. **Prefer full snapshot over delta** when most levels change each tick (simpler, cache-optimal).
+1. **Size slab appropriately**: Use `expected_price_levels * num_ladders * 2 * 1.5`.
+2. **Make dealable fast**: simple bit checks, precomputed org/product rules, no I/O.
+3. **Batch WAL processing**: process 256-1024 records per batch.
+4. **Preallocate hash maps**: size order maps and price_to_slot maps to avoid rehash.
+5. **Right-size workers**: balance load across workers to avoid hotspots.
+6. **Prefer full snapshot over delta** when most levels change each tick.
+7. **Insert position hint**: track whether new orders tend to be at best or spread out.
 
-These are order-of-magnitude estimates; actual throughput depends on dealable logic,
-cache locality, and expected_price_levels settings.
+## Summary
+
+The slab + intrusive queue design mirrors OpenMatch's architecture:
+- Fixed-size slots in a contiguous slab (cache-line aligned)
+- Intrusive queues with uint32_t indices (not pointers)
+- Q0 for free list, Q1 for sorted price ladder
+- Hash map for O(1) price → slot lookup
+- Each worker owns its slab (no cross-worker sharing)
+- Bounded memory, no memmove, O(N) publish
