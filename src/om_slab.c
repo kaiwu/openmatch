@@ -2,6 +2,7 @@
 #include <string.h>
 #include <assert.h>
 #include "../include/openmatch/om_slab.h"
+#include "../include/openmatch/om_error.h"
 
 static inline size_t align_up(size_t size, size_t align) {
     return (size + align - 1) & ~(align - 1);
@@ -33,7 +34,7 @@ OmSlabSlot *om_slot_from_idx(const OmDualSlab *slab, uint32_t idx) {
 
 int om_slab_init(OmDualSlab *slab, const OmSlabConfig *config) {
     if (!slab || !config || config->total_slots == 0) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     memset(slab, 0, sizeof(OmDualSlab));
@@ -48,7 +49,7 @@ int om_slab_init(OmDualSlab *slab, const OmSlabConfig *config) {
     size_t total_a_size = slot_size * config->total_slots;
     slab->slab_a.memory = calloc(1, total_a_size);
     if (!slab->slab_a.memory) {
-        return -1;
+        return OM_ERR_ALLOC_FAILED;
     }
 
     /* Build free list - Q0 is reserved for internal slab use */
@@ -80,14 +81,14 @@ int om_slab_init(OmDualSlab *slab, const OmSlabConfig *config) {
     uint8_t *block = calloc(1, block_size);
     if (!block) {
         free(slab->slab_a.memory);
-        return -1;
+        return OM_ERR_SLAB_AUX_ALLOC;
     }
     
     slab->slab_b.blocks = calloc(1, sizeof(uint8_t *));
     if (!slab->slab_b.blocks) {
         free(block);
         free(slab->slab_a.memory);
-        return -1;
+        return OM_ERR_SLAB_AUX_ALLOC;
     }
     
     slab->slab_b.blocks[0] = block;

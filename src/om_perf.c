@@ -1,4 +1,5 @@
 #include "om_perf.h"
+#include "om_error.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -182,38 +183,38 @@ int om_perf_validate(const OmPerfConfig *config, char *error_buf, size_t error_b
         if (error_buf && error_buf_size > 0) {
             snprintf(error_buf, error_buf_size, "Config is NULL");
         }
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
     
     /* Slab validation */
     if (config->slab_total_slots == 0) {
         snprintf(error_buf, error_buf_size, "slab_total_slots must be > 0");
-        return -1;
+        return OM_ERR_PERF_CONFIG;
     }
     
     if (config->slab_total_slots > 100000000) {
         snprintf(error_buf, error_buf_size, "slab_total_slots too large (max 100M)");
-        return -1;
+        return OM_ERR_PERF_CONFIG;
     }
     
     /* WAL validation */
     if (config->wal_buffer_size < 4096) {
         snprintf(error_buf, error_buf_size, "wal_buffer_size must be >= 4096");
-        return -1;
+        return OM_ERR_PERF_CONFIG;
     }
     
     if (config->wal_use_direct_io && (config->wal_buffer_size % 4096) != 0) {
         snprintf(error_buf, error_buf_size, "wal_buffer_size must be 4KB aligned for O_DIRECT");
-        return -1;
+        return OM_ERR_PERF_CONFIG;
     }
     
     /* Hashmap validation */
     if (config->hashmap_load_factor < 0.1f || config->hashmap_load_factor > 0.95f) {
         snprintf(error_buf, error_buf_size, "hashmap_load_factor must be in [0.1, 0.95]");
-        return -1;
+        return OM_ERR_PERF_CONFIG;
     }
     
-    return 0;
+    return OM_OK;
 }
 
 /* ============================================================================
@@ -264,7 +265,7 @@ void om_perf_print(const OmPerfConfig *config) {
 
 int om_perf_autotune(OmPerfConfig *config) {
     if (!config) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
     
     /* Start with defaults */

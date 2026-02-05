@@ -155,13 +155,13 @@ typedef struct OmEngine {
  * 
  * @param engine Engine context to initialize
  * @param config Engine configuration (slab, optional WAL, callbacks)
- * @return 0 on success, negative on error
+ * @return 0 on success, negative on error (see om_error.h)
  * 
  * Error codes:
- *   -1: Invalid parameters (NULL engine or config)
- *   -2: Slab initialization failed
- *   -3: WAL initialization failed
- *   -4: Orderbook initialization failed
+ *   OM_ERR_NULL_PARAM: Invalid parameters (NULL engine or config)
+ *   OM_ERR_INVALID_PARAM: Invalid configuration values
+ *   OM_ERR_ENGINE_WAL_INIT: WAL initialization failed
+ *   OM_ERR_ENGINE_OB_INIT: Orderbook initialization failed
  */
 int om_engine_init(OmEngine *engine, const OmEngineConfig *config);
 

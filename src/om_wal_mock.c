@@ -1,4 +1,5 @@
 #include "openmatch/om_wal_mock.h"
+#include "openmatch/om_error.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -37,7 +38,7 @@ static void wal_mock_timestamp_string(uint64_t timestamp_ns, bool show, char *bu
 
 int om_wal_mock_init(OmWal *wal, const OmWalConfig *config) {
     if (!wal) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
     memset(wal, 0, sizeof(*wal));
     wal->enabled = true;
@@ -165,7 +166,7 @@ int om_wal_mock_fsync(OmWal *wal) {
 int om_wal_mock_replay_init(OmWalReplay *replay, const char *filename) {
     (void)filename;
     if (!replay) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
     replay->eof = true;
     return 0;

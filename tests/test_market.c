@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "openmarket/om_worker.h"
 #include "openmarket/om_market.h"
+#include "openmatch/om_error.h"
 
 START_TEST(test_market_ring_basic) {
     OmMarketRing ring;
@@ -280,9 +281,9 @@ START_TEST(test_market_publish_combos) {
     ck_assert_int_eq(deltas[0].delta, 40);
     ck_assert_int_eq(om_market_worker_clear_dirty(worker, 2, 0), 0);
 
-    ck_assert_int_eq(om_market_worker_delta_count(worker, 2, 1, OM_SIDE_BID), -1);
-    ck_assert_int_eq(om_market_worker_copy_deltas(worker, 2, 1, OM_SIDE_BID, deltas, 4), -1);
-    ck_assert_int_eq(om_market_worker_copy_full(worker, 2, 1, OM_SIDE_BID, deltas, 4), -1);
+    ck_assert_int_eq(om_market_worker_delta_count(worker, 2, 1, OM_SIDE_BID), OM_ERR_NOT_SUBSCRIBED);
+    ck_assert_int_eq(om_market_worker_copy_deltas(worker, 2, 1, OM_SIDE_BID, deltas, 4), OM_ERR_NOT_SUBSCRIBED);
+    ck_assert_int_eq(om_market_worker_copy_full(worker, 2, 1, OM_SIDE_BID, deltas, 4), OM_ERR_NOT_SUBSCRIBED);
 
     ck_assert_int_eq(om_market_public_delta_count(&market.public_workers[0], 0, OM_SIDE_BID), 1);
     ck_assert_int_eq(om_market_public_copy_deltas(&market.public_workers[0], 0, OM_SIDE_BID,
@@ -298,11 +299,11 @@ START_TEST(test_market_publish_combos) {
     ck_assert_int_eq(deltas[0].delta, 40);
     ck_assert_int_eq(om_market_public_clear_dirty(&market.public_workers[0], 0), 0);
 
-    ck_assert_int_eq(om_market_public_delta_count(&market.public_workers[0], 1, OM_SIDE_BID), -1);
+    ck_assert_int_eq(om_market_public_delta_count(&market.public_workers[0], 1, OM_SIDE_BID), OM_ERR_NOT_SUBSCRIBED);
     ck_assert_int_eq(om_market_public_copy_deltas(&market.public_workers[0], 1, OM_SIDE_BID,
-                                                  deltas, 4), -1);
+                                                  deltas, 4), OM_ERR_NOT_SUBSCRIBED);
     ck_assert_int_eq(om_market_public_copy_full(&market.public_workers[0], 1, OM_SIDE_BID,
-                                                deltas, 4), -1);
+                                                deltas, 4), OM_ERR_NOT_SUBSCRIBED);
 
     om_market_destroy(&market);
 }

@@ -1,4 +1,5 @@
 #include "openmarket/om_worker.h"
+#include "openmatch/om_error.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,10 +9,10 @@ static bool om_market_is_power_of_two(size_t value) {
 
 int om_market_ring_init(OmMarketRing *ring, const OmMarketRingConfig *config) {
     if (!ring || !config || config->capacity == 0 || config->consumer_count == 0) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
     if (!om_market_is_power_of_two(config->capacity)) {
-        return -2;
+        return OM_ERR_RING_NOT_POW2;
     }
     memset(ring, 0, sizeof(*ring));
     ring->capacity = config->capacity;
@@ -21,13 +22,13 @@ int om_market_ring_init(OmMarketRing *ring, const OmMarketRingConfig *config) {
 
     ring->slots = calloc(config->capacity, sizeof(*ring->slots));
     if (!ring->slots) {
-        return -3;
+        return OM_ERR_RING_SLOTS_ALLOC;
     }
     ring->consumer_tails = calloc(config->consumer_count, sizeof(*ring->consumer_tails));
     if (!ring->consumer_tails) {
         free(ring->slots);
         ring->slots = NULL;
-        return -4;
+        return OM_ERR_RING_TAILS_ALLOC;
     }
 
     for (size_t i = 0; i < config->capacity; i++) {
@@ -44,7 +45,7 @@ int om_market_ring_init(OmMarketRing *ring, const OmMarketRingConfig *config) {
         free(ring->slots);
         ring->consumer_tails = NULL;
         ring->slots = NULL;
-        return -5;
+        return OM_ERR_RING_MUTEX_INIT;
     }
     if (pthread_cond_init(&ring->wait_cond, NULL) != 0) {
         pthread_mutex_destroy(&ring->wait_mutex);
@@ -52,7 +53,7 @@ int om_market_ring_init(OmMarketRing *ring, const OmMarketRingConfig *config) {
         free(ring->slots);
         ring->consumer_tails = NULL;
         ring->slots = NULL;
-        return -6;
+        return OM_ERR_RING_COND_INIT;
     }
     return 0;
 }
@@ -70,7 +71,7 @@ void om_market_ring_destroy(OmMarketRing *ring) {
 
 int om_market_ring_register_consumer(OmMarketRing *ring, uint32_t consumer_index) {
     if (!ring || consumer_index >= ring->consumer_count) {
-        return -1;
+        return OM_ERR_RING_CONSUMER_ID;
     }
     atomic_store_explicit(&ring->consumer_tails[consumer_index], 0U, memory_order_release);
     return 0;
@@ -89,7 +90,7 @@ static uint64_t om_market_ring_min_tail(const OmMarketRing *ring) {
 
 int om_market_ring_enqueue(OmMarketRing *ring, void *ptr) {
     if (!ring || !ptr) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     uint64_t head = atomic_load_explicit(&ring->head, memory_order_relaxed);
@@ -120,7 +121,7 @@ int om_market_ring_enqueue(OmMarketRing *ring, void *ptr) {
 
 int om_market_ring_dequeue(OmMarketRing *ring, uint32_t consumer_index, void **out_ptr) {
     if (!ring || !out_ptr || consumer_index >= ring->consumer_count) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     uint64_t tail = atomic_load_explicit(&ring->consumer_tails[consumer_index],
@@ -142,7 +143,7 @@ int om_market_ring_dequeue_batch(OmMarketRing *ring,
                                 void **out_ptrs,
                                 size_t max_count) {
     if (!ring || !out_ptrs || max_count == 0 || consumer_index >= ring->consumer_count) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     uint64_t tail = atomic_load_explicit(&ring->consumer_tails[consumer_index],
@@ -167,7 +168,7 @@ int om_market_ring_dequeue_batch(OmMarketRing *ring,
 
 int om_market_ring_wait(OmMarketRing *ring, uint32_t consumer_index, size_t min_batch) {
     if (!ring || consumer_index >= ring->consumer_count || min_batch == 0) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     pthread_mutex_lock(&ring->wait_mutex);

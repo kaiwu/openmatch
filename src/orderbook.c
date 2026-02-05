@@ -1,16 +1,17 @@
 #include "orderbook.h"
 #include "om_wal.h"
+#include "om_error.h"
 #include <string.h>
 
 int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struct OmWal *wal,
                       uint32_t max_products, uint32_t max_org, uint32_t hashmap_initial_cap)
 {
     if (!ctx || !config) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     if (max_products == 0 || max_org == 0) {
-        return -1;
+        return OM_ERR_INVALID_PARAM;
     }
 
     memset(ctx, 0, sizeof(OmOrderbookContext));
@@ -19,14 +20,14 @@ int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struc
 
     ctx->products = calloc(max_products, sizeof(OmProductBook));
     if (!ctx->products) {
-        return -1;
+        return OM_ERR_PRODUCT_ALLOC;
     }
 
     ctx->org_heads = calloc((size_t)max_products * (size_t)max_org, sizeof(uint32_t));
     if (!ctx->org_heads) {
         free(ctx->products);
         ctx->products = NULL;
-        return -1;
+        return OM_ERR_ORG_ALLOC;
     }
 
     for (uint32_t i = 0; i < max_products * max_org; i++) {
@@ -57,7 +58,7 @@ int om_orderbook_init(OmOrderbookContext *ctx, const OmSlabConfig *config, struc
         free(ctx->products);
         ctx->org_heads = NULL;
         ctx->products = NULL;
-        return -1;
+        return OM_ERR_HASH_INIT;
     }
 
     ctx->next_slot_idx = 0;
@@ -759,7 +760,7 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
                                    OmWalReplayStats *stats)
 {
     if (!ctx || !wal_filename) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     /* Initialize stats if provided */
@@ -780,7 +781,7 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
     };
 
     if (om_wal_replay_init_with_config(&replay, wal_filename, &replay_config) != 0) {
-        return -1;  /* WAL file doesn't exist or can't be opened */
+        return OM_ERR_WAL_OPEN;
     }
 
     /* Replay all records */
@@ -803,7 +804,7 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
                 OmSlabSlot *slot = om_slab_alloc(&ctx->slab);
                 if (!slot) {
                     om_wal_replay_close(&replay);
-                    return -1;
+                    return OM_ERR_SLAB_FULL;
                 }
                 
                 slot->order_id = rec.order_id;
@@ -831,7 +832,7 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
                 if (om_orderbook_insert(ctx, rec.product_id, slot) != 0) {
                     om_slab_free(&ctx->slab, slot);
                     om_wal_replay_close(&replay);
-                    return -1;
+                    return OM_ERR_RECOVERY_FAILED;
                 }
                 
                 if (stats) {
@@ -944,7 +945,7 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
 
     if (replay_status < 0) {
         om_wal_replay_close(&replay);
-        return -1;
+        return OM_ERR_RECOVERY_FAILED;
     }
 
     om_wal_replay_close(&replay);

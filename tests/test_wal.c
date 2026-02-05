@@ -9,6 +9,7 @@
 #include "openmatch/om_engine.h"
 #include "openmatch/orderbook.h"
 #include "openmatch/om_wal.h"
+#include "openmatch/om_error.h"
 
 #define TEST_WAL_FILE "/tmp/test_orderbook.wal"
 #define TEST_WAL_PATTERN "/tmp/test_orderbook_%06u.wal"
@@ -391,7 +392,7 @@ START_TEST(test_wal_crc32_mismatch)
     size_t data_len;
 
     int ret = om_wal_replay_next(&replay, &type, &data, &sequence, &data_len);
-    ck_assert_int_eq(ret, -2);
+    ck_assert_int_eq(ret, OM_ERR_WAL_CRC_MISMATCH);
 
     om_wal_replay_close(&replay);
     cleanup_wal_file();

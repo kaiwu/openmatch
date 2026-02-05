@@ -1,4 +1,5 @@
 #include "openmatch/om_engine.h"
+#include "openmatch/om_error.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -16,7 +17,7 @@
 int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
 {
     if (!engine || !config) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     memset(engine, 0, sizeof(OmEngine));
@@ -53,7 +54,7 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
     }
 
     if (max_products == 0 || max_org == 0) {
-        return -1;
+        return OM_ERR_INVALID_PARAM;
     }
 
     if (hashmap_cap == 0) {
@@ -63,14 +64,14 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
     if (wal_cfg) {
         engine->wal = malloc(sizeof(struct OmWal));
         if (!engine->wal) {
-            return -3;
+            return OM_ERR_ENGINE_WAL_INIT;
         }
         
         int wal_ret = om_wal_init(engine->wal, wal_cfg);
         if (wal_ret != 0) {
             free(engine->wal);
             engine->wal = NULL;
-            return -3;
+            return OM_ERR_ENGINE_WAL_INIT;
         }
         engine->wal_owned = true;
         wal_ptr = engine->wal;
@@ -84,7 +85,7 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
             free(engine->wal);
             engine->wal = NULL;
         }
-        return -4;
+        return OM_ERR_ENGINE_OB_INIT;
     }
 
     engine->callbacks = config->callbacks;
@@ -95,7 +96,7 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
 int om_engine_init_perf(OmEngine *engine, const OmEngineConfig *config, const OmPerfConfig *perf)
 {
     if (!config) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
     OmEngineConfig cfg = *config;
     cfg.perf = perf;
@@ -121,7 +122,7 @@ void om_engine_destroy(OmEngine *engine)
 int om_engine_match(OmEngine *engine, uint16_t product_id, OmSlabSlot *taker)
 {
     if (OM_UNLIKELY(!engine || !taker)) {
-        return -1;
+        return OM_ERR_NULL_PARAM;
     }
 
     uint64_t taker_remaining = taker->volume_remain;
