@@ -145,6 +145,18 @@ records can resolve price/product/remaining without rescanning the book.
 
 ## Performance Estimate (Order of Magnitude)
 
+### Refactor impact (public/private split)
+
+The public path is now **product‑sharded**, so each WAL record updates **one** public ladder
+instead of fanning out to many orgs. The private path remains **org‑sharded** and still does
+per‑org fan‑out for subscribed products. Practically:
+
+- **Public cost per record** ≈ `C_pub` (one order lookup + one ladder update).
+- **Private cost per record** ≈ `(avg_orgs_per_product / W_private) * C_priv`.
+
+Total aggregation time is dominated by the private path unless the public worker count is too
+small. Choose `W_public` so that `(R / W_public) * C_pub` stays below your publish window.
+
 Let:
 
 - `O` = number of orgs
@@ -154,7 +166,7 @@ Let:
 - `R` = WAL records/sec
 
 Total subscriptions ≈ `O * S`. Average orgs per product ≈ `(O * S) / P`.
-Per worker, average orgs per product ≈ `(O * S) / (P * W)`.
+Per **private** worker, average orgs per product ≈ `(O * S) / (P * W_private)`.
 
 Example:
 
@@ -167,12 +179,13 @@ Per worker: **~763 / W** orgs per product.
 
 If per‑org update cost (dealable + ladder update) is ~0.3–1.0µs:
 
-- Per record cost per worker ≈ `(763 / W) * (0.3–1.0µs)`
-- Throughput per worker ≈ `1 / cost`
+- Per record **private** cost per worker ≈ `(763 / W_private) * (0.3–1.0µs)`
+- Public cost per worker ≈ `(R / W_public) * C_pub`
 - Target is **2× realtime** (process 1s of WAL in ≤0.5s)
 
-For **R = 1,000,000 records/sec** (rough), the **minimum** worker threads needed to meet
-the ≤0.5s aggregation window are approximately **4–13 workers**.
+For **R = 1,000,000 records/sec** (rough), the **minimum private** worker threads needed to meet
+the ≤0.5s aggregation window are still approximately **4–13 workers**, because the private path
+retains the per‑org fan‑out. Public workers can be sized independently based on `C_pub` and `R`.
 
 This range assumes per‑org update cost of ~0.3–1.0µs and the subscription
 distribution above; it is an order‑of‑magnitude estimate.
@@ -194,7 +207,9 @@ distribution above; it is an order‑of‑magnitude estimate.
 4. **Preallocate maps**: size order maps and ladders to avoid rehash/resize.
 5. **Use dense arrays if order_id is dense** for public order map (faster than hash).
 6. **Dirty‑flag publishing**: skip serialization if no change; still publish cached snapshot.
-7. **Worker isolation**: avoid shared counters in the hot path to prevent cache line ping‑pong.
+7. **Right‑size public workers**: size `W_public` so each handles a stable product set; avoid
+   a single public worker becoming a hotspot.
+8. **Worker isolation**: avoid shared counters in the hot path to prevent cache line ping‑pong.
 
 These are order‑of‑magnitude estimates; actual throughput depends on dealable logic,
 cache locality, and top‑N settings.
