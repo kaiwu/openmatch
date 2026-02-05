@@ -143,7 +143,6 @@ START_TEST(test_market_worker_dealable) {
         .expected_subscribers_per_product = 1,
         .expected_price_levels = 4,
         .top_levels = 1,
-        .enable_full_snapshot = false,
         .dealable = test_marketable,
         .dealable_ctx = NULL
     };

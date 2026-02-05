@@ -98,7 +98,6 @@ typedef struct OmMarketConfig {
     size_t expected_subscribers_per_product; /**< Avg orgs per product */
     size_t expected_price_levels;
     uint32_t top_levels;                      /**< Top N price levels to aggregate */
-    bool enable_full_snapshot;                /**< Enable full snapshot publishing (optional) */
     OmMarketDealableFn dealable;
     void *dealable_ctx;
 } OmMarketConfig;
@@ -110,7 +109,6 @@ typedef struct OmMarket {
     uint32_t public_worker_count;
     uint16_t max_products;
     uint32_t top_levels;
-    bool enable_full_snapshot;
     OmMarketDealableFn dealable;
     void *dealable_ctx;
 } OmMarket;

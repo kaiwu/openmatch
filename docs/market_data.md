@@ -96,18 +96,52 @@ records can resolve price/product/remaining without rescanning the book.
 - If no WAL records affect a ladder, the **same snapshot** is still published.
 - Dirty flags are used to skip re‑serialization work when unchanged.
 
+**Concrete publish loop (public):**
+
+1. For each product assigned to the public worker, check `om_market_public_is_dirty()`.
+2. If dirty, publish **delta** or **full** (see below) and then clear:
+   - Delta: `om_market_public_clear_deltas()`
+   - Full: `om_market_public_clear_dirty()`
+3. If not dirty, publish cached data (or skip) based on your cadence requirements.
+
+**Concrete publish loop (private):**
+
+1. For each subscribed `(org_id, product_id)` pair in the worker, check
+   `om_market_worker_is_dirty()`.
+2. If dirty, publish **delta** or **full** (see below) and then clear:
+   - Delta: `om_market_worker_clear_deltas()`
+   - Full: `om_market_worker_clear_dirty()`
+3. If not dirty, publish cached data (or skip) based on your cadence requirements.
+
 ## Delta vs Full Snapshot Publishing
 
 - **Delta publishing (default):**
   - Only changed price levels are published each tick.
   - Backed by per‑ladder delta maps (price → delta).
   - Lowest bandwidth and fastest publish when changes are sparse.
+  - **Public delta steps:**
+    1. `count = om_market_public_delta_count(worker, product_id, side)`
+    2. `n = om_market_public_copy_deltas(worker, product_id, side, out, max)`
+    3. Serialize `out[0..n)` and publish to subscribers of `product_id`.
+    4. `om_market_public_clear_deltas(worker, product_id, side)`
+  - **Private delta steps:**
+    1. `count = om_market_worker_delta_count(worker, org_id, product_id, side)`
+    2. `n = om_market_worker_copy_deltas(worker, org_id, product_id, side, out, max)`
+    3. Serialize `out[0..n)` and publish to that org.
+    4. `om_market_worker_clear_deltas(worker, org_id, product_id, side)`
 
 - **Full snapshot publishing (optional):**
   - Publishes all top‑N price levels every tick.
-  - Enable with `OmMarketConfig.enable_full_snapshot = true`.
   - Use `om_market_worker_copy_full` / `om_market_public_copy_full` APIs.
   - Higher bandwidth/CPU but simpler consumers.
+  - **Public full steps:**
+    1. `n = om_market_public_copy_full(worker, product_id, side, out, max)`
+    2. Serialize `out[0..n)` and publish to subscribers of `product_id`.
+    3. `om_market_public_clear_dirty(worker, product_id)`
+  - **Private full steps:**
+    1. `n = om_market_worker_copy_full(worker, org_id, product_id, side, out, max)`
+    2. Serialize `out[0..n)` and publish to that org.
+    3. `om_market_worker_clear_dirty(worker, org_id, product_id)`
 
 ## Performance Estimate (Order of Magnitude)
 

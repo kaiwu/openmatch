@@ -313,7 +313,6 @@ int om_market_init(OmMarket *market, const OmMarketConfig *config) {
     market->public_worker_count = config->public_worker_count;
     market->max_products = config->max_products;
     market->top_levels = config->top_levels;
-    market->enable_full_snapshot = config->enable_full_snapshot;
     market->dealable = config->dealable;
     market->dealable_ctx = config->dealable_ctx;
 
