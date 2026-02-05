@@ -134,7 +134,9 @@ START_TEST(test_market_worker_dealable) {
     OmMarketConfig cfg = {
         .max_products = 16,
         .worker_count = 1,
+        .public_worker_count = 1,
         .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
         .subs = subs,
         .sub_count = 2,
         .expected_orders_per_worker = 4,
@@ -161,12 +163,13 @@ START_TEST(test_market_worker_dealable) {
     };
 
     ck_assert_int_eq(om_market_worker_process(worker, OM_WAL_INSERT, &insert), 0);
+    ck_assert_int_eq(om_market_public_process(&market.public_workers[0], OM_WAL_INSERT, &insert), 0);
 
     uint64_t qty = 0;
     ck_assert_int_ne(om_market_worker_get_qty(worker, 1, 0, OM_SIDE_BID, 10, &qty), 0);
     ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 10, &qty), 0);
     ck_assert_uint_eq(qty, 50);
-    ck_assert_int_eq(om_market_worker_get_public_qty(worker, 0, OM_SIDE_BID, 10, &qty), 0);
+    ck_assert_int_eq(om_market_public_get_qty(&market.public_workers[0], 0, OM_SIDE_BID, 10, &qty), 0);
     ck_assert_uint_eq(qty, 50);
 
     OmWalInsert insert2 = {
@@ -179,17 +182,18 @@ START_TEST(test_market_worker_dealable) {
         .product_id = 0
     };
     ck_assert_int_eq(om_market_worker_process(worker, OM_WAL_INSERT, &insert2), 0);
-    ck_assert_int_ne(om_market_worker_get_public_qty(worker, 0, OM_SIDE_BID, 9, &qty), 0);
+    ck_assert_int_eq(om_market_public_process(&market.public_workers[0], OM_WAL_INSERT, &insert2), 0);
+    ck_assert_int_ne(om_market_public_get_qty(&market.public_workers[0], 0, OM_SIDE_BID, 9, &qty), 0);
     ck_assert_int_ne(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 9, &qty), 0);
     ck_assert_int_eq(om_market_worker_is_dirty(worker, 2, 0), 1);
-    ck_assert_int_eq(om_market_worker_is_public_dirty(worker, 0), 1);
+    ck_assert_int_eq(om_market_public_is_dirty(&market.public_workers[0], 0), 1);
     ck_assert_int_eq(om_market_worker_clear_dirty(worker, 2, 0), 0);
-    ck_assert_int_eq(om_market_worker_clear_public_dirty(worker, 0), 0);
+    ck_assert_int_eq(om_market_public_clear_dirty(&market.public_workers[0], 0), 0);
     ck_assert_int_eq(om_market_worker_is_dirty(worker, 2, 0), 0);
-    ck_assert_int_eq(om_market_worker_is_public_dirty(worker, 0), 0);
+    ck_assert_int_eq(om_market_public_is_dirty(&market.public_workers[0], 0), 0);
     OmMarketDelta deltas[4];
-    ck_assert_int_eq(om_market_worker_public_delta_count(worker, 0, OM_SIDE_BID), 2);
-    ck_assert_int_eq(om_market_worker_copy_public_deltas(worker, 0, OM_SIDE_BID, deltas, 4), 2);
+    ck_assert_int_eq(om_market_public_delta_count(&market.public_workers[0], 0, OM_SIDE_BID), 2);
+    ck_assert_int_eq(om_market_public_copy_deltas(&market.public_workers[0], 0, OM_SIDE_BID, deltas, 4), 2);
     bool found_10 = false;
     for (int i = 0; i < 2; i++) {
         if (deltas[i].price == 10 && deltas[i].delta == 50) {
@@ -197,11 +201,11 @@ START_TEST(test_market_worker_dealable) {
         }
     }
     ck_assert(found_10);
-    ck_assert_int_eq(om_market_worker_copy_public_full(worker, 0, OM_SIDE_BID, deltas, 4), 1);
+    ck_assert_int_eq(om_market_public_copy_full(&market.public_workers[0], 0, OM_SIDE_BID, deltas, 4), 1);
     ck_assert_uint_eq(deltas[0].price, 10);
     ck_assert_int_eq(deltas[0].delta, 50);
-    ck_assert_int_eq(om_market_worker_clear_public_deltas(worker, 0, OM_SIDE_BID), 0);
-    ck_assert_int_eq(om_market_worker_public_delta_count(worker, 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_public_clear_deltas(&market.public_workers[0], 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_public_delta_count(&market.public_workers[0], 0, OM_SIDE_BID), 0);
     ck_assert_int_eq(om_market_worker_is_subscribed(worker, 2, 0), 1);
     ck_assert_int_eq(om_market_worker_is_subscribed(worker, 2, 1), 0);
 

@@ -13,8 +13,9 @@ This document describes how OpenMarket consumes WAL records and builds
 
 ## Data Ownership & Sharding
 
-- Workers are **sharded by org**.
-- Each worker only processes products **subscribed** by its orgs.
+- **Private workers** are **sharded by org**.
+- **Public workers** are **sharded by product** (via `product_to_public_worker`).
+- Private and public workers can consume the **same** WAL stream or different streams.
 - Each worker maintains its own ladders and order maps (no cross-worker writes).
 
 ## Record Flow
@@ -29,13 +30,13 @@ This document describes how OpenMarket consumes WAL records and builds
 
 **Public (product-level)**
 
-- If the product is subscribed by any org in this worker:
+- For the public worker assigned to the product:
   - Add `vol_remain` to the public ladder at `(product_id, side, price)`
   - **Only if** `price` is inside the current top‑N range for that side.
 
 **Private (org-level)**
 
-- For each subscribed org in the worker for this product:
+- For each subscribed org in the **private** worker for this product:
   - Call `dealable(rec, viewer_org)` → `dq`
   - If `dq > 0`, add `min(vol_remain, dq)` to the org’s private ladder
   - **Only if** `price` is inside the current top‑N range
@@ -105,7 +106,7 @@ records can resolve price/product/remaining without rescanning the book.
 - **Full snapshot publishing (optional):**
   - Publishes all top‑N price levels every tick.
   - Enable with `OmMarketConfig.enable_full_snapshot = true`.
-  - Use `om_market_worker_copy_full` / `om_market_worker_copy_public_full` APIs.
+  - Use `om_market_worker_copy_full` / `om_market_public_copy_full` APIs.
   - Higher bandwidth/CPU but simpler consumers.
 
 ## Performance Estimate (Order of Magnitude)
