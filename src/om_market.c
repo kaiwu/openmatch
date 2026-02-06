@@ -117,6 +117,54 @@ static uint32_t om_market_slab_alloc(OmMarketLevelSlab *slab) {
     return idx;
 }
 
+/* Grow slab capacity. Returns 0 on success.
+ * Since we use uint32_t indices (not pointers), all existing indices remain valid after realloc.
+ */
+static int om_market_slab_grow(OmMarketLevelSlab *slab) {
+    if (!slab) {
+        return OM_ERR_NULL_PARAM;
+    }
+
+    /* Double capacity (or use minimum growth) */
+    uint32_t old_cap = slab->capacity;
+    uint32_t new_cap = old_cap * 2;
+    if (new_cap < old_cap + 64) {
+        new_cap = old_cap + 64;  /* Minimum growth */
+    }
+
+    /* Realloc slots array - indices remain valid */
+    OmMarketLevelSlot *new_slots = realloc(slab->slots, new_cap * sizeof(OmMarketLevelSlot));
+    if (!new_slots) {
+        return OM_ERR_ALLOC_FAILED;
+    }
+    slab->slots = new_slots;
+
+    /* Initialize new slots and link into Q0 free list */
+    for (uint32_t i = old_cap; i < new_cap; i++) {
+        OmMarketLevelSlot *slot = &slab->slots[i];
+        memset(slot, 0, sizeof(*slot));
+        slot->q0_prev = (i == old_cap) ? slab->q0_tail : (i - 1);
+        slot->q0_next = (i == new_cap - 1) ? OM_MARKET_SLOT_NULL : (i + 1);
+        slot->q1_prev = OM_MARKET_SLOT_NULL;
+        slot->q1_next = OM_MARKET_SLOT_NULL;
+        slot->ladder_idx = UINT32_MAX;
+    }
+
+    /* Link new slots to existing Q0 tail */
+    if (slab->q0_tail != OM_MARKET_SLOT_NULL) {
+        slab->slots[slab->q0_tail].q0_next = old_cap;
+    } else {
+        /* Q0 was empty */
+        slab->q0_head = old_cap;
+    }
+    slab->q0_tail = new_cap - 1;
+
+    slab->capacity = new_cap;
+    slab->free_count += (new_cap - old_cap);
+
+    return 0;
+}
+
 /* Free a slot back to Q0 free list (push to head). */
 static void om_market_slab_free(OmMarketLevelSlab *slab, uint32_t idx) {
     if (!slab || idx >= slab->capacity) {
@@ -313,10 +361,18 @@ static int om_ladder_add_qty(OmMarketLevelSlab *slab,
         return 0;
     }
 
-    /* Allocate new slot */
+    /* Allocate new slot, grow slab if needed */
     uint32_t slot_idx = om_market_slab_alloc(slab);
     if (slot_idx == OM_MARKET_SLOT_NULL) {
-        return OM_ERR_SLAB_FULL;
+        /* Slab full - grow and retry */
+        int grow_ret = om_market_slab_grow(slab);
+        if (grow_ret != 0) {
+            return grow_ret;  /* Growth failed (OOM) */
+        }
+        slot_idx = om_market_slab_alloc(slab);
+        if (slot_idx == OM_MARKET_SLOT_NULL) {
+            return OM_ERR_SLAB_FULL;  /* Should not happen after successful grow */
+        }
     }
 
     /* Initialize slot */

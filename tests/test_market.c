@@ -665,10 +665,72 @@ START_TEST(test_market_dynamic_ladder_match) {
 }
 END_TEST
 
+/* Test slab growth: insert more price levels than initial capacity */
+START_TEST(test_market_slab_growth) {
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) {
+        org_to_worker[i] = 0;
+    }
+    OmMarketSubscription subs[1] = {
+        {.org_id = 1, .product_id = 0}
+    };
+    OmMarketConfig cfg = {
+        .max_products = 4,
+        .worker_count = 1,
+        .public_worker_count = 1,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
+        .subs = subs,
+        .sub_count = 1,
+        .expected_orders_per_worker = 4,
+        .expected_subscribers_per_product = 1,
+        .expected_price_levels = 4,  /* Small initial capacity to trigger growth */
+        .top_levels = 100,
+        .dealable = test_marketable,
+        .dealable_ctx = NULL
+    };
+
+    ck_assert_int_eq(om_market_init(&market, &cfg), 0);
+    OmMarketPublicWorker *pub = &market.public_workers[0];
+
+    /* Insert 100 distinct price levels - should trigger slab growth */
+    for (uint64_t i = 0; i < 100; i++) {
+        OmWalInsert insert = {
+            .order_id = i + 1,
+            .price = 1000 + i,  /* Distinct prices */
+            .volume = 10,
+            .vol_remain = 10,
+            .org = 1,
+            .flags = OM_SIDE_BID,
+            .product_id = 0
+        };
+        ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &insert), 0);
+    }
+
+    /* Verify all 100 price levels are tracked */
+    uint64_t qty = 0;
+    for (uint64_t i = 0; i < 100; i++) {
+        ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 1000 + i, &qty), 0);
+        ck_assert_uint_eq(qty, 10);
+    }
+
+    /* Verify copy_full returns prices in sorted order (descending for bids) */
+    OmMarketDelta full[100];
+    int n = om_market_public_copy_full(pub, 0, OM_SIDE_BID, full, 100);
+    ck_assert_int_eq(n, 100);
+    ck_assert_uint_eq(full[0].price, 1099);  /* Best bid (highest) */
+    ck_assert_uint_eq(full[99].price, 1000); /* Worst bid (lowest) */
+
+    om_market_destroy(&market);
+}
+END_TEST
+
 Suite* market_suite(void) {
     Suite *s = suite_create("market");
     TCase *tc_core = tcase_create("core");
     tcase_add_test(tc_core, test_market_struct_sizes);
+    tcase_add_test(tc_core, test_market_slab_growth);
     tcase_add_test(tc_core, test_market_ring_basic);
     tcase_add_test(tc_core, test_market_ring_batch);
     tcase_add_test(tc_core, test_market_ring_wait_notify);

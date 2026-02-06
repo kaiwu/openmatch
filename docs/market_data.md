@@ -158,6 +158,13 @@ typedef struct OmMarketLadder {
 |-----------|-------|------|
 | **Alloc** | Pop from Q0 head | O(1) |
 | **Free** | Push to Q0 head | O(1) |
+| **Grow** | Realloc slots, link new slots to Q0 tail | O(new_capacity) |
+
+**Slab Growth**: When a slot allocation fails (slab full), the slab doubles in capacity
+via `realloc`. Since we use uint32_t indices (not pointers), all existing indices remain
+valid after growth. New slots are initialized and linked to the Q0 free list tail.
+This is a rare event - initial sizing accounts for expected load - but ensures we never
+lose WAL records due to capacity limits.
 
 ### Ladder Operations
 
