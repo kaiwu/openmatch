@@ -361,6 +361,161 @@ memory = 150,000 * 64 bytes = 9.6 MB per private worker
 6. **Prefer full snapshot over delta** when most levels change each tick.
 7. **Insert position hint**: track whether new orders tend to be at best or spread out.
 
+## Capacity Planning
+
+### Reference Scenario
+
+| Parameter | Value |
+|-----------|-------|
+| Orgs (O) | 5,000 |
+| Products per org (P) | 10,000 |
+| Total subscriptions (S = O × P) | 50,000,000 |
+| Price levels per side (L) | 20 |
+| WAL throughput (R) | 1,000,000/s |
+| Publish window | 1.0s |
+| Aggregation budget (T) | 0.5s (remaining 0.5s for serialization) |
+
+### Per-Record Cost Model
+
+**Public worker** — no fan-out, 1 product operation per WAL record:
+
+| Operation | Cost |
+|-----------|------|
+| `product_has_subs` check | ~1ns |
+| `kh_put(order_map)` | ~35ns |
+| `kh_get(level_map, price)` (hit) | ~25ns |
+| `slot.qty += qty` | ~5ns |
+| Delta map update | ~25ns |
+| **Total per record** | **~90ns** |
+
+**Private worker** — fans out to O/W orgs per record (W = worker count):
+
+| Operation | Cost |
+|-----------|------|
+| `find_ladder()` (array indexed) | ~10ns |
+| `dealable()` callback | ~5ns |
+| `kh_put(order_map)` | ~35ns |
+| `kh_get(level_map, price)` (hit) | ~25ns |
+| `slot.qty += qty` | ~5ns |
+| Delta map update | ~25ns |
+| Mark dirty | ~5ns |
+| **Total per org** | **~110ns** |
+
+With L2/L3 cache pressure from large working sets: **150-200ns per org realistic**.
+
+### Public Worker Sizing
+
+```
+records_per_window = R × T = 1,000,000 × 0.5 = 500,000
+time_needed = 500,000 × 90ns = 45ms
+```
+
+**1-2 public workers** is sufficient.
+
+Memory per public worker:
+```
+slab = P × L × 2 sides × 64 bytes = 10,000 × 20 × 2 × 64 = 25.6 MB
+hash + orders overhead ≈ 2× slab ≈ 50 MB
+total ≈ 75 MB per public worker
+```
+
+### Private Worker Sizing (Fan-out at Insert)
+
+Each private worker reads ALL WAL records and fans out to its assigned orgs.
+
+Time budget per record: `T / (R × T) = 500ns`
+
+```
+constraint: (O / W) × cost_per_org ≤ 500ns
+
+Optimistic  (110ns/org):  W ≥ 5,000 × 110 / 500 = 1,100
+Realistic   (150ns/org):  W ≥ 5,000 × 150 / 500 = 1,500
+Pessimistic (200ns/org):  W ≥ 5,000 × 200 / 500 = 2,000
+```
+
+Memory (constant regardless of W, total across all workers):
+```
+slab:   S × L × 2 × 64 bytes  = 50M × 40 × 64      = 128 GB
+hashes: ~2× slab overhead                             =  64 GB
+orders: S × avg_active_orders × 40 bytes              ≈  50 GB
+────────────────────────────────────────────────────────────────
+total private                                         ≈ 250 GB
+```
+
+### Scaling Limit of Fan-out at Insert
+
+The fundamental cost is:
+
+```
+total_org_operations = R × (O / W) × W = R × O = 5 billion/s
+```
+
+This is **independent of W** — sharding reduces per-worker work but total work is
+fixed. At 5,000 orgs the fan-out-at-insert design requires **~1,500 workers and
+~250 GB RAM** for private aggregation alone. This does not scale.
+
+### Alternative: Compute-on-Publish
+
+Instead of fanning out per-org counters at WAL ingestion time:
+
+1. **WAL processing** — same as public worker (no per-org fan-out):
+   - Update public ladder + record order state per org
+   - Per record: ~200ns (public ladder update + order hash put)
+   - **2-3 WAL workers** handle 1M/s
+
+2. **At publish time**, compute private view on demand:
+   ```
+   for each (org, product) subscription:
+       walk public top-N (N levels)
+       for each level: private_qty = public_qty - self_qty_at_price
+   ```
+   - Cost: N × ~10ns = 200ns per subscription
+   - Total: 50M subs × 200ns = 10s
+   - With Wp publish workers: 10s / Wp
+   - **20 publish workers** to finish in 0.5s
+
+3. **Memory**: only per-org order state, no per-org slab/ladders
+   - Public slab: ~25 MB per public worker
+   - Per-org order sets: 5,000 orgs × active_orders × ~40 bytes ≈ few GB
+   - **Total ≈ 30 GB**
+
+### Comparison
+
+| | Fan-out at Insert | Compute-on-Publish |
+|---|---|---|
+| WAL workers | 1,500-2,000 | 2-3 |
+| Publish workers | 0 (pre-computed) | 20 |
+| **Total workers** | **~1,500** | **~25** |
+| **Memory** | **~250 GB** | **~30 GB** |
+| Private read latency | O(N) walk, instant | O(N) compute per sub |
+| Complexity | Per-org slab + ladders | Per-org order set only |
+| Trade-off | Pre-computed, fast read | Computed on demand |
+
+**Recommendation**: For O > ~100 orgs, compute-on-publish is strongly preferred.
+The fan-out design works well for small org counts (10-50) where the per-record
+fan-out cost is bounded.
+
+### Quick Sizing Formula
+
+For fan-out-at-insert private workers:
+```
+W_private ≥ O × cost_per_org / time_budget_per_record
+         = O × 150ns / (T / (R × T))
+         = O × 150ns × R
+
+Example: 50 orgs, 1M/s WAL, 0.5s budget
+  W ≥ 50 × 150 / 500 = 15 workers
+```
+
+For compute-on-publish:
+```
+W_wal     = R × cost_per_record / T = 1M × 200ns / 0.5 ≈ 1 worker
+W_publish = S × cost_per_sub / T    = S × 200ns / T
+
+Example: 50M subs, 0.5s budget
+  W_publish = 50M × 200ns / 0.5 = 20 workers
+```
+
 ## Summary
 
 The slab + intrusive queue design mirrors OpenMatch's architecture:
@@ -370,3 +525,7 @@ The slab + intrusive queue design mirrors OpenMatch's architecture:
 - Hash map for O(1) price → slot lookup
 - Each worker owns its slab (no cross-worker sharing)
 - Bounded memory, no memmove, O(N) publish
+- Slab growth via realloc when capacity exceeded (indices survive)
+
+For large-scale deployments (>100 orgs), consider compute-on-publish for private
+ladders to avoid O(R × O) fan-out cost.
