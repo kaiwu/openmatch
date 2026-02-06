@@ -102,24 +102,36 @@ typedef struct OmMarketLadder {
 
 **Each worker owns its own slab** - no sharing between workers.
 
-### Private Worker
+### Private Worker (Compute-on-Publish)
+
+The private worker uses a **product-level slab+Q1 ladder** (like the public worker)
+for sorted price structure, plus lightweight **per-org hash maps** (`org_price_qty`)
+for dealable qty per (org, product, side, price). No per-org slabs or Q1 lists.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ OmMarketWorker                                                  │
 ├─────────────────────────────────────────────────────────────────┤
-│ slab: OmMarketLevelSlab                                         │
+│ product_slab: OmMarketLevelSlab                                 │
 │   └─ slots[0..capacity-1]  (64-byte aligned, contiguous)        │
 │                                                                 │
-│ ladders[0]: (org0, prod0)                                       │
+│ product_ladders[prod0]:                                         │
 │   ├─ bid: head ──→ slot[5] ──→ slot[12] ──→ slot[3] ──→ NULL   │
 │   │        (100)      (95)        (90)                          │
 │   ├─ ask: head ──→ slot[8] ──→ slot[2] ──→ NULL                │
 │   │        (101)      (105)                                     │
 │   └─ price_to_slot: {100→5, 95→12, 90→3, 101→8, 105→2}         │
 │                                                                 │
-│ ladders[1]: (org0, prod1)                                       │
+│ product_ladders[prod1]:                                         │
 │   └─ ...                                                        │
+│                                                                 │
+│ global_orders: khash order_id → OmMarketOrderState              │
+│                                                                 │
+│ org_price_qty[ladder_idx*2+side]:  khash price → qty            │
+│   (org0,prod0,bid): {100→50, 95→20}                            │
+│   (org0,prod0,ask): {101→30}                                   │
+│   (org1,prod0,bid): {100→25, 95→10}  ← different dealable qty  │
+│   ...                                                           │
 │                                                                 │
 │ orders[org_idx]: khash order_id → OmMarketOrderState            │
 │ ladder_dirty[]: 64-byte aligned flags                           │
@@ -329,21 +341,27 @@ Finding insert position is O(L) worst case, but can be optimized:
 
 ## Slab Sizing
 
-Each worker's slab should be sized for:
-
+**Public worker** slab:
 ```
-capacity = num_ladders * expected_levels_per_side * 2 (bid + ask) * safety_factor
+capacity = max_products * expected_levels_per_side * 2 (bid + ask) * safety_factor
+```
+
+**Private worker** product slab (same formula — no per-org slabs):
+```
+capacity = max_products * expected_levels_per_side * 2 (bid + ask) * safety_factor
 ```
 
 Example:
-- Private worker with 1000 subscriptions
+- Private worker with 10,000 products
 - Expected 50 price levels per side
 - Safety factor 1.5
 
 ```
-capacity = 1000 * 50 * 2 * 1.5 = 150,000 slots
-memory = 150,000 * 64 bytes = 9.6 MB per private worker
+capacity = 10,000 * 50 * 2 * 1.5 = 1,500,000 slots
+memory = 1,500,000 * 64 bytes = 96 MB per private worker
 ```
+
+Per-org qty is stored in `org_price_qty` hash maps (auto-resizing, no slab needed).
 
 ## False Sharing Prevention
 
@@ -390,18 +408,27 @@ memory = 150,000 * 64 bytes = 9.6 MB per private worker
 
 **Private worker** — fans out to O/W orgs per record (W = worker count):
 
+Phase 1 (product-level, once per record):
+
+| Operation | Cost |
+|-----------|------|
+| `om_ladder_add_qty(product_slab)` | ~30ns |
+| `kh_put(global_orders)` | ~35ns |
+| **Total per record** | **~65ns** |
+
+Phase 2 (per-org fan-out):
+
 | Operation | Cost |
 |-----------|------|
 | `find_ladder()` (array indexed) | ~10ns |
 | `dealable()` callback | ~5ns |
-| `kh_put(order_map)` | ~35ns |
-| `kh_get(level_map, price)` (hit) | ~25ns |
-| `slot.qty += qty` | ~5ns |
-| Delta map update | ~25ns |
-| Mark dirty | ~5ns |
-| **Total per org** | **~110ns** |
+| `kh_put(order_map)` per org | ~15ns |
+| `kh_put(org_price_qty)` hash | ~5ns |
+| Delta map update | ~5ns |
+| **Total per org** | **~40ns** |
 
-With L2/L3 cache pressure from large working sets: **150-200ns per org realistic**.
+With L2/L3 cache pressure from large working sets: **40-60ns per org realistic**
+(down from 150-200ns: no per-org slab alloc, no Q1 insert walk).
 
 ### Public Worker Sizing
 
@@ -419,9 +446,10 @@ hash + orders overhead ≈ 2× slab ≈ 50 MB
 total ≈ 75 MB per public worker
 ```
 
-### Private Worker Sizing (Fan-out at Insert)
+### Private Worker Sizing (Compute-on-Publish)
 
-Each private worker reads ALL WAL records and fans out to its assigned O/W orgs.
+Each private worker reads ALL WAL records, updates a product-level ladder (once),
+then fans out dealable qty to per-org hash maps (~40ns/org).
 
 ```
 records_in_window = R × T = 1,000,000 × 0.5 = 500,000
@@ -430,46 +458,44 @@ time_budget_per_record = T / (R × T) = 1/R = 1μs = 1000ns
 
 Per record, each worker fans out to O/W orgs:
 ```
-constraint: (O / W) × cost_per_org ≤ 1000ns
+constraint: 65ns + (O / W) × cost_per_org ≤ 1000ns
 
-Optimistic  (110ns/org):  W ≥ 5,000 × 110 / 1000 = 550
-Realistic   (150ns/org):  W ≥ 5,000 × 150 / 1000 = 750
-Pessimistic (200ns/org):  W ≥ 5,000 × 200 / 1000 = 1,000
+Optimistic  (40ns/org):  W ≥ 5,000 × 40 / 935 = 214
+Realistic   (50ns/org):  W ≥ 5,000 × 50 / 935 = 267
+Pessimistic (60ns/org):  W ≥ 5,000 × 60 / 935 = 321
 ```
 
 Example: 10 workers, 500 orgs each:
 ```
-per record:  500 × 150ns = 75μs
-per window:  500,000 × 75μs = 37.5s  (75× over budget → need 750 workers)
+per record:  65ns + 500 × 50ns = 25μs
+per window:  500,000 × 25μs = 12.5s  (25× over budget → need ~270 workers)
 ```
 
 Memory (constant regardless of W, total across all workers):
 ```
-slab:   S × L × 2 × 64 bytes  = 50M × 40 × 64      = 128 GB
-hashes: ~2× slab overhead                             =  64 GB
-orders: S × avg_active_orders × 40 bytes              ≈  50 GB
+product_slab: P × L × 2 × 64 bytes = 10K × 20 × 2 × 64 =  25 MB per worker
+org_price_qty: S × ~40 bytes                              ≈   2 GB total
+orders: O × avg_active_orders × 40 bytes                  ≈   few GB
 ────────────────────────────────────────────────────────────────
-total private                                         ≈ 250 GB
+total private                                             ≈  10 GB
 ```
 
-### Scaling Limit of Fan-out at Insert
+### Scaling Improvement vs Old Design
 
-The fundamental cost is:
-
-```
-total_org_operations = R × (O / W) × W = R × O = 5 billion/s
-```
-
-This is **independent of W** — sharding reduces per-worker work but total work is
-fixed. At 5,000 orgs the fan-out-at-insert design requires **~1,500 workers and
-~250 GB RAM** for private aggregation alone. This does not scale.
+The old design used per-org slabs + Q1 ladders at ~150ns/org, requiring ~750
+workers and ~250 GB RAM. The new design eliminates per-org slabs entirely:
+- **Workers**: ~270 (down from ~750, ~2.8x reduction)
+- **Memory**: ~10 GB (down from ~250 GB, ~25x reduction)
+- **Per-org cost**: ~40-60ns (down from ~150-200ns, ~3x reduction)
 
 ### Alternative: Compute-on-Publish
 
 Instead of fanning out per-org counters at WAL ingestion time:
 
 1. **WAL processing** — same as public worker (no per-org fan-out):
-   - Update public ladder + record order state per org
+   - Update public ladder
+   - Record per-order state keyed by `order_id` (includes org_id, product, side, price, remaining)
+   - Optional: maintain per-org aggregated qty-at-price maps for faster publish
    - Per record: ~200ns (public ladder update + order hash put)
    - **2-3 WAL workers** handle 1M/s
 
@@ -477,47 +503,76 @@ Instead of fanning out per-org counters at WAL ingestion time:
    ```
    for each (org, product) subscription:
        walk public top-N (N levels)
-       for each level: private_qty = public_qty - self_qty_at_price
+       for each level: private_qty = public_qty - self_qty_at_price(org, product, side, price)
    ```
-   - Cost: N × ~10ns = 200ns per subscription
-   - Total: 50M subs × 200ns = 10s
-   - With Wp publish workers: 10s / Wp
-   - **20 publish workers** to finish in 0.5s
+   - If `self_qty_at_price` comes from a per-org map: O(1) per price level
+   - If derived by scanning org orders: O(k) per price (k = orders at that price)
+   - With O(1) self-qty: cost ≈ N × ~10ns per subscription
 
 3. **Memory**: only per-org order state, no per-org slab/ladders
    - Public slab: ~25 MB per public worker
    - Per-org order sets: 5,000 orgs × active_orders × ~40 bytes ≈ few GB
+   - Optional per-org price maps: +O(active_price_levels)
    - **Total ≈ 30 GB**
+
+#### Compute-on-Publish Cost Model
+
+Let:
+- `R` = WAL records per second
+- `T` = aggregation window in seconds
+- `S` = subscriptions (org × product)
+- `N` = top levels published per side
+- `C_wal` = cost per record (ns)
+- `C_pub` = cost per subscription per level (ns)
+
+**WAL workers**
+```
+W_wal ≥ (R × C_wal) / (T × 1e9)
+```
+
+**Publish workers**
+```
+W_publish ≥ (S × N × C_pub) / (T × 1e9)
+```
+
+**Reference scenario** (R=1M/s, T=0.5s, S=50M, N=20, C_wal=200ns, C_pub=10ns):
+```
+W_wal     ≥ (1e6 × 200) / (0.5 × 1e9) = 0.4  → 1 worker
+W_publish ≥ (50e6 × 20 × 10) / (0.5 × 1e9) = 20 workers
+```
 
 ### Comparison
 
-| | Fan-out at Insert | Compute-on-Publish |
-|---|---|---|
-| WAL workers | 1,500-2,000 | 2-3 |
-| Publish workers | 0 (pre-computed) | 20 |
-| **Total workers** | **~1,500** | **~25** |
-| **Memory** | **~250 GB** | **~30 GB** |
-| Private read latency | O(N) walk, instant | O(N) compute per sub |
-| Complexity | Per-org slab + ladders | Per-org order set only |
-| Trade-off | Pre-computed, fast read | Computed on demand |
+The current implementation uses a hybrid approach: product-level slab+Q1 ladder
+for sorted price structure, with per-org hash maps for dealable qty. This avoids
+the O(R x O x 150ns) cost of per-org slab+Q1 ladders.
 
-**Recommendation**: For O > ~100 orgs, compute-on-publish is strongly preferred.
-The fan-out design works well for small org counts (10-50) where the per-record
-fan-out cost is bounded.
+| | Old (Per-org Slabs) | Current (Product Slab + OrgPriceQty) | Full Compute-on-Publish |
+|---|---|---|---|
+| WAL workers | ~750 | ~270 | 2-3 |
+| Publish workers | 0 (pre-computed) | 0 (pre-computed) | 20 |
+| **Total workers** | **~750** | **~270** | **~25** |
+| **Memory** | **~250 GB** | **~10 GB** | **~30 GB** |
+| Per-org cost | ~150ns | ~40ns | 0 (at ingest) |
+| Private read | O(1) hash | O(1) hash | O(N) compute |
+| Publish | O(N) Q1 walk | O(N) Q1 walk + filter | O(N) compute |
+| Complexity | Per-org slab+Q1 | Product slab + hash maps | Per-org order set only |
 
 ### Quick Sizing Formula
 
-For fan-out-at-insert private workers:
+For current design (product slab + org_price_qty):
 ```
-W_private ≥ O × cost_per_org / time_budget_per_record
-         = O × 150ns / (T / (R × T))
-         = O × 150ns × R
+W_private ≥ (65ns + O/W × 50ns) × R / 1e9
 
 Example: 50 orgs, 1M/s WAL, 0.5s budget
-  W ≥ 50 × 150 / 500 = 15 workers
+  per record: 65 + 50 × 50 = 2565ns
+  W ≥ 2565ns × 1M / 0.5s ≈ 6 workers
+
+Example: 5000 orgs, 1M/s WAL, 0.5s budget
+  W ≥ 5000 × 50 / (1000 - 65) ≈ 268 workers
 ```
 
-For compute-on-publish:
+For full compute-on-publish (future optimization):
 ```
 W_wal     = R × cost_per_record / T = 1M × 200ns / 0.5 ≈ 1 worker
 W_publish = S × cost_per_sub / T    = S × 200ns / T
@@ -525,6 +580,28 @@ W_publish = S × cost_per_sub / T    = S × 200ns / T
 Example: 50M subs, 0.5s budget
   W_publish = 50M × 200ns / 0.5 = 20 workers
 ```
+
+## Two-Phase Coordination (Private Workers)
+
+Private workers process WAL records in two phases within a single thread:
+
+**Phase 1 — Ingest** (once per WAL record):
+1. Update product-level ladder (`product_slab` + `product_ladders[product_id]`)
+2. Record order state in `global_orders` (order_id -> product/side/price/remaining)
+
+**Phase 2 — Fan-out** (per subscriber org):
+1. Call `dealable(rec, viewer_org)` -> dq
+2. If dq > 0: record per-org order, update `org_price_qty[ladder_idx*2+side]`
+3. Record delta, mark dirty
+
+**At publish time** — query uses both structures:
+- `get_qty()`: direct lookup in `org_price_qty` hash map
+- `copy_full()`: walk `product_ladders[product_id]` Q1 (sorted), filter by
+  `org_price_qty` at each price level (skip prices with zero org qty)
+
+Within a single worker, the two phases are implicit (sequential in the same thread).
+Cross-worker coordination is not needed because each worker owns its own data
+structures (no sharing).
 
 ## Summary
 

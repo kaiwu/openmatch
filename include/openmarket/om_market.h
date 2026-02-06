@@ -49,6 +49,7 @@ KHASH_MAP_INIT_INT64(om_market_order_map, OmMarketOrderState)
 KHASH_MAP_INIT_INT(om_market_pair_map, uint32_t)
 KHASH_MAP_INIT_INT64(om_market_delta_map, int64_t)
 KHASH_MAP_INIT_INT64(om_market_level_map, uint32_t)  /**< price → slot_idx */
+KHASH_MAP_INIT_INT64(om_market_qty_map, uint64_t)    /**< price → qty (per-org) */
 
 /**
  * Price level slot - exactly 64 bytes (1 cache line).
@@ -140,8 +141,10 @@ typedef struct OmMarketWorker {
     size_t ladder_index_stride;
     uint8_t *product_has_subs;
     uint32_t top_levels;
-    OmMarketLevelSlab slab;         /**< Worker-owned slab for price level slots */
-    OmMarketLadder *ladders;        /**< Per-subscription ladders (Q1 queue heads) */
+    OmMarketLevelSlab product_slab;  /**< Worker-owned slab for product-level price slots */
+    OmMarketLadder *product_ladders; /**< Per-product ladders (Q1 queue heads) [max_products] */
+    khash_t(om_market_order_map) *global_orders; /**< order_id -> state for product ladder */
+    khash_t(om_market_qty_map) **org_price_qty;  /**< Per-org price->qty [sub_count*2] */
     uint8_t *ladder_dirty;          /**< 64-byte aligned dirty flags */
     khash_t(om_market_delta_map) **ladder_deltas;
     khash_t(om_market_pair_map) *pair_to_ladder;

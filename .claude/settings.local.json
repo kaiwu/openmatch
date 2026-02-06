@@ -12,7 +12,9 @@
       "Bash(make:*)",
       "Bash(LD_PRELOAD=/usr/lib/libasan.so ./test_runner:*)",
       "Bash(gcc:*)",
-      "Bash(/tmp/check_size:*)"
+      "Bash(/tmp/check_size:*)",
+      "Bash(./tests/test_runner:*)",
+      "Bash(cmake:*)"
     ]
   }
 }
