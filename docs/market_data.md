@@ -421,16 +421,26 @@ total ≈ 75 MB per public worker
 
 ### Private Worker Sizing (Fan-out at Insert)
 
-Each private worker reads ALL WAL records and fans out to its assigned orgs.
-
-Time budget per record: `T / (R × T) = 500ns`
+Each private worker reads ALL WAL records and fans out to its assigned O/W orgs.
 
 ```
-constraint: (O / W) × cost_per_org ≤ 500ns
+records_in_window = R × T = 1,000,000 × 0.5 = 500,000
+time_budget_per_record = T / (R × T) = 1/R = 1μs = 1000ns
+```
 
-Optimistic  (110ns/org):  W ≥ 5,000 × 110 / 500 = 1,100
-Realistic   (150ns/org):  W ≥ 5,000 × 150 / 500 = 1,500
-Pessimistic (200ns/org):  W ≥ 5,000 × 200 / 500 = 2,000
+Per record, each worker fans out to O/W orgs:
+```
+constraint: (O / W) × cost_per_org ≤ 1000ns
+
+Optimistic  (110ns/org):  W ≥ 5,000 × 110 / 1000 = 550
+Realistic   (150ns/org):  W ≥ 5,000 × 150 / 1000 = 750
+Pessimistic (200ns/org):  W ≥ 5,000 × 200 / 1000 = 1,000
+```
+
+Example: 10 workers, 500 orgs each:
+```
+per record:  500 × 150ns = 75μs
+per window:  500,000 × 75μs = 37.5s  (75× over budget → need 750 workers)
 ```
 
 Memory (constant regardless of W, total across all workers):
