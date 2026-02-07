@@ -55,6 +55,22 @@ Priority is ordered by expected impact on throughput/latency and implementation 
 7. **Optional: compact org lookup structure when org cardinality per worker is small**
    - Improves cache locality over wide sparse lookups.
 
+## Implementation Status
+
+Completed in code:
+
+- Cached per-subscription ladder indices in fan-out loops
+- Pre-initialized private/public delta maps (no lazy hot-path `kh_init`)
+- Reused private `copy_full` scratch qty map (`kh_clear` instead of alloc/free)
+- Added ring enqueue spin backoff (`pause` + periodic `sched_yield`)
+- Added consumer-side `min_tail` refresh to reduce producer full rescans
+- Added ladder insertion hint fields and hint-guided insertion search
+
+Remaining optional work:
+
+- Compact org lookup layout for sparse org-id distributions
+- Further wake strategy tuning for very high consumer counts
+
 ## Estimated Impact by Component
 
 The table below estimates realistic deltas once all items above are implemented.
@@ -126,3 +142,51 @@ W >= (O * per_org_ns) / (1000ns - fixed_ns)
 ```
 
 with measured `per_org_ns` and `fixed_ns`.
+
+## Benchmark Harness
+
+A standalone benchmark tool is available to measure `fixed_ns` and `per_org_ns`
+from the current implementation:
+
+- Source: `tests/bench_market_perf.c`
+- Binary: `build/tests/bench_market_perf`
+
+### Build
+
+```bash
+cd build
+cmake ..
+make -j$(nproc)
+```
+
+### Run (example)
+
+```bash
+cd build
+ASAN_OPTIONS=verify_asan_link_order=0 \
+  ./tests/bench_market_perf \
+  --orgs 1024 \
+  --products 10000 \
+  --iters 20000 \
+  --warmup 2000 \
+  --total-orgs 5000
+```
+
+### Output
+
+The tool prints:
+
+- low/high org profile timings for INSERT/MATCH/CANCEL
+- fitted `fixed_ns` and `per_org_ns`
+- computed worker estimate with:
+
+```text
+W >= (O * per_org_ns) / (1000 - fixed_ns)
+```
+
+### Important Notes
+
+- Use a Release-like build for capacity planning (sanitizers materially increase
+  timings and can make worker estimates pessimistic or unavailable).
+- Keep `iters` large enough for stable numbers; compare multiple runs and use
+  the median.

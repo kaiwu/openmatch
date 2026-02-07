@@ -110,11 +110,13 @@ typedef struct OmMarketLadder {
     uint32_t bid_head;          /**< best bid (highest price) */
     uint32_t bid_tail;          /**< worst bid (lowest price) */
     uint32_t bid_count;         /**< active bid levels */
+    uint32_t bid_hint;          /**< recent bid insertion hint */
 
     /* Q1 heads/tails for ask side */
     uint32_t ask_head;          /**< best ask (lowest price) */
     uint32_t ask_tail;          /**< worst ask (highest price) */
     uint32_t ask_count;         /**< active ask levels */
+    uint32_t ask_hint;          /**< recent ask insertion hint */
 
     /* O(1) price lookup */
     khash_t(om_market_level_map) *price_to_slot;
@@ -139,6 +141,7 @@ typedef struct OmMarketWorker {
     uint32_t org_count;
     uint32_t *product_offsets;
     uint16_t *product_orgs;
+    uint32_t *product_ladder_indices;
     uint16_t *org_ids;
     uint32_t *org_index_map;
     uint32_t *ladder_index;
@@ -149,6 +152,7 @@ typedef struct OmMarketWorker {
     OmMarketLadder *product_ladders; /**< Per-product ladders (Q1 queue heads) [max_products] */
     khash_t(om_market_order_set) **product_order_sets; /**< Per-product order_id sets [max_products] */
     khash_t(om_market_order_map) *global_orders; /**< order_id -> state for product ladder */
+    khash_t(om_market_qty_map) *scratch_qty_map; /**< Reused temp map for copy_full */
     uint8_t *ladder_dirty;          /**< 64-byte aligned dirty flags */
     khash_t(om_market_delta_map) **ladder_deltas;
     khash_t(om_market_pair_map) *pair_to_ladder;
