@@ -3,6 +3,9 @@
 This document describes how OpenMarket consumes WAL records and builds
 **public** and **private** market data per product/price/side.
 
+For optimization planning and capacity-impact estimates, see
+[`docs/perf_market_data.md`](perf_market_data.md).
+
 ## Definitions
 
 - **Public ladder**: total remaining quantity at each price level for a product.
