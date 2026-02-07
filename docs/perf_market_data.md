@@ -66,14 +66,30 @@ Completed in code:
 - Added consumer-side `min_tail` refresh to reduce producer full rescans
 - Added ladder insertion hint fields and hint-guided insertion search
 
+Planned but not implemented yet:
+
+- Replace/augment `pthread_cond_broadcast` with targeted wake strategy for very high consumer counts
+
 Remaining optional work:
 
 - Compact org lookup layout for sparse org-id distributions
 - Further wake strategy tuning for very high consumer counts
 
+## Test Coverage Status
+
+Market test coverage was expanded to protect recent performance-path changes and
+sharding behavior in `tests/test_market.c`:
+
+- lifecycle/idempotency checks for `DEACTIVATE`/`ACTIVATE` and repeated transitions
+- ring API error-path coverage (invalid params, invalid consumer ids)
+- multi-worker and multi-public-worker sharding behavior
+- delta copy truncation and bid/ask side-isolation checks
+- private `copy_full` correctness under mixed ownership + match/cancel sequence
+
 ## Estimated Impact by Component
 
-The table below estimates realistic deltas once all items above are implemented.
+The table below estimates realistic deltas for the implemented core optimizations
+(with additional upside if wake strategy and org-index compaction are also applied).
 Numbers are directional planning estimates, not benchmark guarantees.
 
 | Component | Baseline | Projected | Rationale |
@@ -190,3 +206,14 @@ W >= (O * per_org_ns) / (1000 - fixed_ns)
   timings and can make worker estimates pessimistic or unavailable).
 - Keep `iters` large enough for stable numbers; compare multiple runs and use
   the median.
+
+## Revision History
+
+- 2026-02-07: Initial perf plan and 5000x10000 worker-capacity estimate added.
+- 2026-02-07: Added implementation-status updates after core optimizations
+  (cached ladder indices, pre-init deltas, scratch-map reuse, ring backoff,
+  consumer-side min-tail refresh, insertion hints).
+- 2026-02-07: Added benchmark harness documentation for
+  `tests/bench_market_perf.c`.
+- 2026-02-07: Added test-coverage status summary for market lifecycle,
+  idempotency, ring error paths, sharding, and delta/copy_full correctness.
