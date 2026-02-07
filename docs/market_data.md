@@ -30,7 +30,7 @@ OpenMarket uses the same architectural pattern as OpenMatch:
 - **uint32_t indices** instead of pointers (fits more in cache line)
 - **Hash map** for O(1) price → slot lookup
 
-### Price Level Slot (64 bytes = 1 cache line)
+### Price Level Slot (32 bytes = 2 slots per cache line)
 
 ```c
 #define OM_MARKET_SLOT_NULL UINT32_MAX
@@ -47,15 +47,7 @@ typedef struct OmMarketLevelSlot {
     // Data (16 bytes)
     uint64_t price;
     uint64_t qty;
-
-    // Metadata (8 bytes)
-    uint32_t ladder_idx;        // which ladder owns this slot
-    uint16_t side;              // OM_SIDE_BID or OM_SIDE_ASK
-    uint16_t flags;             // reserved
-
-    // Padding to 64 bytes (24 bytes)
-    uint8_t reserved[24];
-} OmMarketLevelSlot;            // 64 bytes exactly
+} OmMarketLevelSlot;            // 32 bytes exactly
 ```
 
 ### Queue Definitions
@@ -73,7 +65,7 @@ queues for LRU eviction or time-ordered tracking).
 
 ```c
 typedef struct OmMarketLevelSlab {
-    OmMarketLevelSlot *slots;   // contiguous array, 64-byte aligned
+    OmMarketLevelSlot *slots;   // contiguous array, cache-line aligned allocation
     uint32_t capacity;          // total slots
     uint32_t q0_head;           // free list head
     uint32_t q0_tail;           // free list tail
@@ -124,7 +116,7 @@ Fan-out during ingest is kept only for delta/dirty tracking.
 │ OmMarketWorker                                                  │
 ├─────────────────────────────────────────────────────────────────┤
 │ product_slab: OmMarketLevelSlab                                 │
-│   └─ slots[0..capacity-1]  (64-byte aligned, contiguous)        │
+│   └─ slots[0..capacity-1]  (contiguous, cache-line aligned alloc)│
 │                                                                 │
 │ product_ladders[prod0]:                                         │
 │   ├─ bid: head ──→ slot[5] ──→ slot[12] ──→ slot[3] ──→ NULL   │
@@ -155,7 +147,7 @@ Fan-out during ingest is kept only for delta/dirty tracking.
 │ OmMarketPublicWorker                                            │
 ├─────────────────────────────────────────────────────────────────┤
 │ slab: OmMarketLevelSlab                                         │
-│   └─ slots[0..capacity-1]  (64-byte aligned, contiguous)        │
+│   └─ slots[0..capacity-1]  (contiguous, cache-line aligned alloc)│
 │                                                                 │
 │ ladders[prod0]:                                                 │
 │   ├─ bid: head ──→ slot[1] ──→ slot[7] ──→ ...                 │
@@ -372,7 +364,7 @@ Example:
 
 ```
 capacity = 10,000 * 50 * 2 * 1.5 = 1,500,000 slots
-memory = 1,500,000 * 64 bytes = 96 MB per private worker
+memory = 1,500,000 * 32 bytes = 48 MB per private worker
 ```
 
 Per-org qty is computed on demand from `global_orders` + dealable callback (no per-org storage).
@@ -464,9 +456,9 @@ time_needed = 500,000 × 90ns = 45ms
 
 Memory per public worker:
 ```
-slab = P × L × 2 sides × 64 bytes = 10,000 × 20 × 2 × 64 = 25.6 MB
-hash + orders overhead ≈ 2× slab ≈ 50 MB
-total ≈ 75 MB per public worker
+slab = P × L × 2 sides × 32 bytes = 10,000 × 20 × 2 × 32 = 12.8 MB
+hash + orders overhead ≈ 2× slab ≈ 26 MB
+total ≈ 40 MB per public worker
 ```
 
 ### Private Worker Sizing (Compute-on-Publish)
@@ -502,10 +494,10 @@ per window:  500,000 × 8μs = 4.0s  (8× over budget → need ~86 workers)
 
 Memory (constant regardless of W, total across all workers):
 ```
-product_slab: P × L × 2 × 64 bytes = 10K × 20 × 2 × 64 =  25 MB per worker
+product_slab: P × L × 2 × 32 bytes = 10K × 20 × 2 × 32 = ~13 MB per worker
 global_orders: avg_active_orders × ~56 bytes               ≈  few hundred MB
 ────────────────────────────────────────────────────────────────
-total private                                             ≈   5 GB
+total private                                             ≈   4 GB
 ```
 
 Query cost at publish time: `get_qty()` and `copy_full()` iterate per-product order
@@ -517,7 +509,7 @@ orders for the queried product (not total orders across all products).
 The old design used per-org slabs + Q1 ladders at ~150ns/org, requiring ~750
 workers and ~250 GB RAM. The current design eliminates ALL per-org state:
 - **Workers**: ~86-107 (down from ~750, ~7-9x reduction)
-- **Memory**: ~5 GB (down from ~250 GB, ~50x reduction)
+- **Memory**: ~4 GB (down from ~250 GB, ~60x reduction)
 - **Per-org cost**: ~15-30ns blended (down from ~150-200ns, ~7-10x reduction)
 
 ### Comparison
@@ -531,7 +523,7 @@ for sorted price structure, with per-org qty computed on demand from `global_ord
 | WAL workers | ~750 | ~270 | ~86-107 |
 | Publish workers | 0 (pre-computed) | 0 (pre-computed) | 0 (computed on query) |
 | **Total workers** | **~750** | **~270** | **~86-107** |
-| **Memory** | **~250 GB** | **~10 GB** | **~5 GB** |
+| **Memory** | **~250 GB** | **~10 GB** | **~4 GB** |
 | Per-org ingest cost | ~150ns | ~40ns | ~15-25ns (delta/dirty only) |
 | Private read | O(1) hash | O(1) hash | O(k) per-product compute |
 | Publish | O(N) Q1 walk | O(N) Q1 walk + filter | O(k) build + O(N) walk |

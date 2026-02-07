@@ -13,7 +13,7 @@
  * @brief OpenMarket public API
  *
  * Uses slab + intrusive queue architecture:
- * - Fixed-size 64-byte price level slots in contiguous slab
+ * - Fixed-size 32-byte price level slots in contiguous slab
  * - Q0: free list for slab allocation
  * - Q1: sorted price ladder (bids descending, asks ascending)
  * - uint32_t indices instead of pointers (cache-friendly)
@@ -56,7 +56,7 @@ KHASH_MAP_INIT_INT64(om_market_level_map, uint32_t)  /**< price → slot_idx */
 KHASH_MAP_INIT_INT64(om_market_qty_map, uint64_t)    /**< price → qty (per-org) */
 
 /**
- * Price level slot - exactly 64 bytes (1 cache line).
+ * Price level slot - exactly 32 bytes (2 slots per 64-byte cache line).
  *
  * Each slot is either in Q0 (free list) or Q1 (price ladder), never both.
  * Links could be unioned but kept separate for future expansion.
@@ -73,22 +73,14 @@ typedef struct OmMarketLevelSlot {
     /* Data (16 bytes) */
     uint64_t price;
     uint64_t qty;
-
-    /* Metadata (8 bytes) */
-    uint32_t ladder_idx;        /**< which ladder owns this slot */
-    uint16_t side;              /**< OM_SIDE_BID or OM_SIDE_ASK */
-    uint16_t flags;             /**< reserved */
-
-    /* Padding to 64 bytes (24 bytes) */
-    uint8_t reserved[24];
-} OmMarketLevelSlot;            /* 64 bytes exactly */
+} OmMarketLevelSlot;            /* 32 bytes exactly */
 
 /**
  * Slab allocator for price level slots.
  * Q0 is the free list - slots are allocated from head, freed to head.
  */
 typedef struct OmMarketLevelSlab {
-    OmMarketLevelSlot *slots;   /**< contiguous array, 64-byte aligned */
+    OmMarketLevelSlot *slots;   /**< contiguous array (cache-line aligned allocation) */
     uint32_t capacity;          /**< total slots */
     uint32_t q0_head;           /**< free list head */
     uint32_t q0_tail;           /**< free list tail */

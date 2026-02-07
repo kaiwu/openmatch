@@ -6,8 +6,8 @@
 #include "openmatch/om_error.h"
 
 START_TEST(test_market_struct_sizes) {
-    /* Verify OmMarketLevelSlot is exactly 64 bytes (1 cache line) */
-    ck_assert_uint_eq(sizeof(OmMarketLevelSlot), 64);
+    /* Verify OmMarketLevelSlot is exactly 32 bytes (2 per cache line) */
+    ck_assert_uint_eq(sizeof(OmMarketLevelSlot), 32);
 
     /* Verify OM_MARKET_SLOT_NULL is UINT32_MAX */
     ck_assert_uint_eq(OM_MARKET_SLOT_NULL, UINT32_MAX);

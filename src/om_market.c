@@ -44,7 +44,7 @@ static uint32_t om_market_pair_key(uint16_t org_id, uint16_t product_id) {
 /* ============================================================================
  * Slab Operations (Q0 Free List)
  *
- * The slab allocator manages fixed-size 64-byte slots. Free slots are linked
+ * The slab allocator manages fixed-size 32-byte slots. Free slots are linked
  * via Q0 (q0_next/q0_prev). Allocation pops from head, free pushes to head.
  * ============================================================================ */
 
@@ -53,7 +53,7 @@ static int om_market_slab_init(OmMarketLevelSlab *slab, uint32_t capacity) {
         return OM_ERR_INVALID_PARAM;
     }
 
-    /* Allocate 64-byte aligned slots */
+    /* Allocate cache-line aligned slots */
     slab->slots = om_aligned_calloc(capacity, sizeof(OmMarketLevelSlot));
     if (!slab->slots) {
         return OM_ERR_ALLOC_FAILED;
@@ -68,7 +68,6 @@ static int om_market_slab_init(OmMarketLevelSlab *slab, uint32_t capacity) {
         slab->slots[i].q0_next = (i == capacity - 1) ? OM_MARKET_SLOT_NULL : (i + 1);
         slab->slots[i].q1_prev = OM_MARKET_SLOT_NULL;
         slab->slots[i].q1_next = OM_MARKET_SLOT_NULL;
-        slab->slots[i].ladder_idx = UINT32_MAX;
     }
 
     slab->q0_head = 0;
@@ -109,9 +108,6 @@ static uint32_t om_market_slab_alloc(OmMarketLevelSlab *slab) {
     slot->q1_prev = OM_MARKET_SLOT_NULL;
     slot->price = 0;
     slot->qty = 0;
-    slot->ladder_idx = UINT32_MAX;
-    slot->side = 0;
-    slot->flags = 0;
 
     slab->free_count--;
     return idx;
@@ -147,7 +143,6 @@ static int om_market_slab_grow(OmMarketLevelSlab *slab) {
         slot->q0_next = (i == new_cap - 1) ? OM_MARKET_SLOT_NULL : (i + 1);
         slot->q1_prev = OM_MARKET_SLOT_NULL;
         slot->q1_next = OM_MARKET_SLOT_NULL;
-        slot->ladder_idx = UINT32_MAX;
     }
 
     /* Link new slots to existing Q0 tail */
@@ -408,7 +403,6 @@ static void om_ladder_unlink(OmMarketLevelSlab *slab,
  */
 static int om_ladder_add_qty(OmMarketLevelSlab *slab,
                               OmMarketLadder *ladder,
-                              uint32_t ladder_idx,
                               uint64_t price,
                               uint64_t qty,
                               bool is_bid) {
@@ -443,8 +437,6 @@ static int om_ladder_add_qty(OmMarketLevelSlab *slab,
     OmMarketLevelSlot *slot = &slab->slots[slot_idx];
     slot->price = price;
     slot->qty = qty;
-    slot->ladder_idx = ladder_idx;
-    slot->side = is_bid ? OM_SIDE_BID : OM_SIDE_ASK;
 
     /* Add to hash map */
     int ret = 0;
@@ -1214,7 +1206,7 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
             /* 1. Update product ladder */
             om_ladder_add_qty(&worker->product_slab,
                               &worker->product_ladders[rec->product_id],
-                              rec->product_id, rec->price, rec->vol_remain, is_bid);
+                              rec->price, rec->vol_remain, is_bid);
 
             /* 2. Record in global_orders with org/flags/vol_remain */
             int gret = 0;
@@ -1328,7 +1320,7 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
             gstate->active = true;
             om_ladder_add_qty(&worker->product_slab,
                               &worker->product_ladders[gstate->product_id],
-                              gstate->product_id, gstate->price, gstate->remaining, is_bid);
+                              gstate->price, gstate->remaining, is_bid);
 
             /* 3. Fan-out: compute per-org qty, record delta */
             uint32_t start = worker->product_offsets[gstate->product_id];
@@ -1450,7 +1442,7 @@ int om_market_public_process(OmMarketPublicWorker *worker, OmWalType type, const
             kh_val(worker->orders, pub_it) = pub_state;
             OmMarketLadder *ladder = &worker->ladders[rec->product_id];
             bool is_bid = OM_IS_BID(rec->flags);
-            om_ladder_add_qty(&worker->slab, ladder, rec->product_id, rec->price, rec->vol_remain, is_bid);
+            om_ladder_add_qty(&worker->slab, ladder, rec->price, rec->vol_remain, is_bid);
             khash_t(om_market_delta_map) *delta_map =
                 om_market_delta_for_public(worker, rec->product_id, is_bid);
             om_market_delta_add(delta_map, rec->price, (int64_t)rec->vol_remain);
@@ -1494,7 +1486,7 @@ int om_market_public_process(OmMarketPublicWorker *worker, OmWalType type, const
             OmMarketLadder *ladder = &worker->ladders[pub_state->product_id];
             bool is_bid = pub_state->side == OM_SIDE_BID;
             uint64_t added = pub_state->remaining;
-            om_ladder_add_qty(&worker->slab, ladder, pub_state->product_id, pub_state->price, added, is_bid);
+            om_ladder_add_qty(&worker->slab, ladder, pub_state->price, added, is_bid);
             pub_state->active = true;
             khash_t(om_market_delta_map) *delta_map =
                 om_market_delta_for_public(worker, pub_state->product_id, is_bid);
