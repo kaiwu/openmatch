@@ -137,6 +137,9 @@ Fan-out during ingest is kept only for delta/dirty tracking.
 │   {order_id → (product_id, side, active, org, flags,            │
 │                price, remaining, vol_remain)}                    │
 │                                                                 │
+│ product_order_sets[prod_id]: khash_set of order_ids             │
+│   (per-product index for O(k) queries instead of O(K))          │
+│                                                                 │
 │ ladder_dirty[]: 64-byte aligned flags                           │
 │ ladder_deltas[]: delta tracking hash maps                       │
 └─────────────────────────────────────────────────────────────────┘
@@ -387,8 +390,9 @@ Per-org qty is computed on demand from `global_orders` + dealable callback (no p
 5. **Right-size workers**: balance load across workers to avoid hotspots.
 6. **Prefer full snapshot over delta** when most levels change each tick.
 7. **Insert position hint**: track whether new orders tend to be at best or spread out.
-8. **Limit active orders**: `get_qty()` and `copy_full()` iterate all active orders
-   in `global_orders`. Keep active order count reasonable per worker (~100K).
+8. **Per-product order sets**: `get_qty()` and `copy_full()` iterate only orders
+   for the queried product via `product_order_sets`, giving O(k) cost where
+   k = active orders for that product (typically ~100x smaller than total orders).
 
 ## Capacity Planning
 
@@ -429,15 +433,21 @@ Phase 1 (product-level, once per record):
 
 Phase 2 (per-org fan-out, delta/dirty tracking only):
 
-| Operation | Cost |
-|-----------|------|
-| `find_ladder()` (array indexed) | ~10ns |
-| `dealable()` callback | ~5ns |
-| Delta map update | ~5ns |
-| Dirty flag | ~1ns |
-| **Total per org** | **~25ns** |
+| Operation | INSERT | MATCH | CANCEL |
+|-----------|--------|-------|--------|
+| `find_ladder()` (array indexed) | ~10ns | ~10ns | ~10ns |
+| `dealable()` callback | ~5ns (direct, no fake) | ~5ns (1 call, reused) | ~5ns |
+| `_om_market_qty_from_dq()` | — | ~2ns (×2 pre/post) | — |
+| Fake `OmWalInsert` construct | — | ~5ns (1×, was 2×) | ~5ns |
+| Delta map update | ~5ns | ~5ns | ~5ns |
+| Dirty flag | ~1ns | ~1ns | ~1ns |
+| **Total per org** | **~15ns** | **~15ns** | **~25ns** |
 
-With L2/L3 cache pressure from large working sets: **25-40ns per org realistic**.
+INSERT skips fake `OmWalInsert` construction (uses original `rec` directly).
+MATCH uses a single `dealable()` call + `_om_market_qty_from_dq()` for pre/post qty
+(was 2× `dealable()` + 2× fake construct).
+
+With L2/L3 cache pressure from large working sets: **15-30ns per org realistic**.
 No per-org order maps or qty maps — dealable qty is computed on demand at query time.
 
 ### Public Worker Sizing
@@ -459,27 +469,32 @@ total ≈ 75 MB per public worker
 ### Private Worker Sizing (Compute-on-Publish)
 
 Each private worker reads ALL WAL records, updates a product-level ladder (once),
-then fans out delta/dirty tracking to subscriber orgs (~25ns/org). Per-org qty
-is computed on demand at query/publish time from global state + dealable callback.
+then fans out delta/dirty tracking to subscriber orgs (~15-25ns/org depending on
+record type). Per-org qty is computed on demand at query/publish time from global
+state + dealable callback.
 
 ```
 records_in_window = R × T = 1,000,000 × 0.5 = 500,000
 time_budget_per_record = T / (R × T) = 1/R = 1μs = 1000ns
 ```
 
-Per record, each worker fans out to O/W orgs:
+Per record, each worker fans out to O/W orgs. Blended cost depends on WAL record
+mix (typical: ~60% INSERT, ~30% MATCH, ~10% CANCEL):
 ```
+blended_cost = 0.6 × 15ns + 0.3 × 15ns + 0.1 × 25ns = 16ns/org
+
 constraint: 65ns + (O / W) × cost_per_org ≤ 1000ns
 
-Optimistic  (25ns/org):  W ≥ 5,000 × 25 / 935 = 134
-Realistic   (30ns/org):  W ≥ 5,000 × 30 / 935 = 160
-Pessimistic (40ns/org):  W ≥ 5,000 × 40 / 935 = 214
+Optimistic  (15ns/org):  W ≥ 5,000 × 15 / 935 =  80
+Blended     (16ns/org):  W ≥ 5,000 × 16 / 935 =  86
+Realistic   (20ns/org):  W ≥ 5,000 × 20 / 935 = 107
+Pessimistic (30ns/org):  W ≥ 5,000 × 30 / 935 = 160
 ```
 
 Example: 10 workers, 500 orgs each:
 ```
-per record:  65ns + 500 × 30ns = 15μs
-per window:  500,000 × 15μs = 7.5s  (15× over budget → need ~160 workers)
+per record:  65ns + 500 × 16ns = 8μs
+per window:  500,000 × 8μs = 4.0s  (8× over budget → need ~86 workers)
 ```
 
 Memory (constant regardless of W, total across all workers):
@@ -490,17 +505,17 @@ global_orders: avg_active_orders × ~56 bytes               ≈  few hundred MB
 total private                                             ≈   5 GB
 ```
 
-Query cost at publish time: `get_qty()` and `copy_full()` iterate `global_orders`
-and call `dealable()` per order, so are O(active_orders) per call. This is acceptable
-for periodic publish (1s intervals) but not suitable for per-record hot-path queries.
+Query cost at publish time: `get_qty()` and `copy_full()` iterate per-product order
+sets and call `dealable()` per matching order, so are O(k) per call where k = active
+orders for the queried product (not total orders across all products).
 
 ### Scaling Improvement vs Old Design
 
 The old design used per-org slabs + Q1 ladders at ~150ns/org, requiring ~750
 workers and ~250 GB RAM. The current design eliminates ALL per-org state:
-- **Workers**: ~160 (down from ~750, ~4.7x reduction)
+- **Workers**: ~86-107 (down from ~750, ~7-9x reduction)
 - **Memory**: ~5 GB (down from ~250 GB, ~50x reduction)
-- **Per-org cost**: ~25-40ns (down from ~150-200ns, ~5x reduction)
+- **Per-org cost**: ~15-30ns blended (down from ~150-200ns, ~7-10x reduction)
 
 ### Comparison
 
@@ -510,32 +525,31 @@ for sorted price structure, with per-org qty computed on demand from `global_ord
 
 | | Old (Per-org Slabs) | Hybrid (Product Slab + OrgPriceQty) | **Current (Compute-on-Publish)** |
 |---|---|---|---|
-| WAL workers | ~750 | ~270 | ~160 |
+| WAL workers | ~750 | ~270 | ~86-107 |
 | Publish workers | 0 (pre-computed) | 0 (pre-computed) | 0 (computed on query) |
-| **Total workers** | **~750** | **~270** | **~160** |
+| **Total workers** | **~750** | **~270** | **~86-107** |
 | **Memory** | **~250 GB** | **~10 GB** | **~5 GB** |
-| Per-org ingest cost | ~150ns | ~40ns | ~25ns (delta/dirty only) |
-| Private read | O(1) hash | O(1) hash | O(active_orders) compute |
-| Publish | O(N) Q1 walk | O(N) Q1 walk + filter | O(N) Q1 walk + compute |
+| Per-org ingest cost | ~150ns | ~40ns | ~15-25ns (delta/dirty only) |
+| Private read | O(1) hash | O(1) hash | O(k) per-product compute |
+| Publish | O(N) Q1 walk | O(N) Q1 walk + filter | O(k) build + O(N) walk |
 | Per-org state | slab+Q1+orders | qty maps + orders | **none** |
 
 ### Quick Sizing Formula
 
-For current design (compute-on-publish):
+For current design (compute-on-publish, blended ~16ns/org):
 ```
-W_private ≥ (65ns + O/W × 30ns) × R / 1e9
+W_private ≥ (65ns + O/W × 16ns) × R / 1e9
 
 Example: 50 orgs, 1M/s WAL, 0.5s budget
-  per record: 65 + 50 × 30 = 1565ns
-  W ≥ 1565ns × 1M / 0.5s ≈ 4 workers
+  per record: 65 + 50 × 16 = 865ns
+  W ≥ 865ns × 1M / 0.5s ≈ 2 workers
 
 Example: 5000 orgs, 1M/s WAL, 0.5s budget
-  W ≥ 5000 × 30 / (1000 - 65) ≈ 161 workers
+  W ≥ 5000 × 16 / (1000 - 65) ≈ 86 workers
 ```
 
-Note: query-time cost (`get_qty`, `copy_full`) is O(active_orders) per call
-since it iterates `global_orders` and calls dealable() per matching order. This
-is acceptable for periodic publish but not for per-record queries.
+Query-time cost (`get_qty`, `copy_full`) is O(k) per call where k = active orders
+for the queried product, using per-product order sets for efficient iteration.
 
 ## Two-Phase Coordination (Private Workers)
 
@@ -555,8 +569,8 @@ Private workers process WAL records in two phases within a single thread:
 state, because the formula needs the pre-operation `remaining` value.
 
 **At publish time** — query computes per-org qty on demand:
-- `get_qty()`: iterates `global_orders`, sums computed per-org qty for matching orders
-- `copy_full()`: builds temp price->qty map from `global_orders`, then walks Q1 ladder
+- `get_qty()`: iterates per-product order set, sums computed per-org qty for matching orders — O(k)
+- `copy_full()`: builds temp price->qty map from per-product order set, then walks Q1 ladder — O(k) + O(N)
 
 Within a single worker, the two phases are implicit (sequential in the same thread).
 Cross-worker coordination is not needed because each worker owns its own data

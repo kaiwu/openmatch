@@ -552,6 +552,20 @@ static int om_market_worker_init(OmMarketWorker *worker,
         }
     }
 
+    /* Per-product order_id sets for O(k) query instead of O(K) */
+    worker->product_order_sets = calloc((size_t)max_products, sizeof(*worker->product_order_sets));
+    if (!worker->product_order_sets) {
+        om_market_worker_destroy(worker);
+        return OM_ERR_ALLOC_FAILED;
+    }
+    for (uint32_t i = 0; i < max_products; i++) {
+        worker->product_order_sets[i] = kh_init(om_market_order_set);
+        if (!worker->product_order_sets[i]) {
+            om_market_worker_destroy(worker);
+            return OM_ERR_HASH_INIT;
+        }
+    }
+
     /* Global orders map for product ladder tracking */
     worker->global_orders = kh_init(om_market_order_map);
     if (!worker->global_orders) {
@@ -716,6 +730,15 @@ static void om_market_worker_destroy(OmMarketWorker *worker) {
             om_ladder_destroy(&worker->product_ladders[i]);
         }
     }
+    /* Destroy per-product order sets */
+    if (worker->product_order_sets) {
+        for (uint32_t i = 0; i < worker->max_products; i++) {
+            if (worker->product_order_sets[i]) {
+                kh_destroy(om_market_order_set, worker->product_order_sets[i]);
+            }
+        }
+    }
+    free(worker->product_order_sets);
     om_market_slab_destroy(&worker->product_slab);
     if (worker->global_orders) {
         kh_destroy(om_market_order_map, worker->global_orders);
@@ -1057,26 +1080,13 @@ static uint64_t om_market_compute_org_qty(const OmMarketWorker *worker,
     return cap > matched ? cap - matched : 0;
 }
 
-/* Compute per-org qty with a custom remaining value (for pre/post match). */
-static uint64_t om_market_compute_org_qty_with(const OmMarketWorker *worker,
-                                                const OmMarketOrderState *state,
-                                                uint64_t order_id,
-                                                uint16_t viewer_org,
-                                                uint64_t remaining) {
-    if (!worker->dealable) return 0;
-    OmWalInsert fake = {
-        .order_id = order_id,
-        .price = state->price,
-        .volume = state->vol_remain,
-        .vol_remain = state->vol_remain,
-        .org = state->org,
-        .flags = state->flags,
-        .product_id = state->product_id,
-    };
-    uint64_t dq = worker->dealable(&fake, viewer_org, worker->dealable_ctx);
+
+/* Compute qty from a precomputed dealable value + remaining. */
+static inline uint64_t _om_market_qty_from_dq(uint64_t vol_remain, uint64_t dq,
+                                               uint64_t remaining) {
     if (dq == 0) return 0;
-    uint64_t cap = state->vol_remain < dq ? state->vol_remain : dq;
-    uint64_t matched = state->vol_remain - remaining;
+    uint64_t cap = vol_remain < dq ? vol_remain : dq;
+    uint64_t matched = vol_remain - remaining;
     return cap > matched ? cap - matched : 0;
 }
 
@@ -1119,8 +1129,12 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
                 .vol_remain = rec->vol_remain
             };
 
-            /* 3. Fan-out: compute per-org qty via dealable, record delta + dirty */
-            OmMarketOrderState *gstate = &kh_val(worker->global_orders, git);
+            /* 3. Add to per-product order set */
+            int sret = 0;
+            kh_put(om_market_order_set, worker->product_order_sets[rec->product_id],
+                   rec->order_id, &sret);
+
+            /* 4. Fan-out: call dealable directly (no fake OmWalInsert needed) */
             uint32_t start = worker->product_offsets[rec->product_id];
             uint32_t end = worker->product_offsets[rec->product_id + 1U];
             for (uint32_t idx = start; idx < end; idx++) {
@@ -1129,10 +1143,9 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
                 if (om_market_worker_find_ladder(worker, viewer_org, rec->product_id, &ladder_idx) != 0) {
                     continue;
                 }
-                uint64_t qty = om_market_compute_org_qty(worker, gstate, rec->order_id, viewer_org);
-                if (qty == 0) {
-                    continue;
-                }
+                uint64_t dq = worker->dealable(rec, viewer_org, worker->dealable_ctx);
+                if (dq == 0) continue;
+                uint64_t qty = rec->vol_remain < dq ? rec->vol_remain : dq;
 
                 khash_t(om_market_delta_map) *delta_map =
                     om_market_delta_for_ladder(worker, ladder_idx, is_bid);
@@ -1181,6 +1194,15 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
             om_ladder_sub_qty(&worker->product_slab,
                               &worker->product_ladders[gstate->product_id],
                               gstate->price, gstate->remaining, is_bid);
+
+            /* 4. Remove from per-product order set */
+            khiter_t sit = kh_get(om_market_order_set,
+                                  worker->product_order_sets[gstate->product_id],
+                                  rec->order_id);
+            if (sit != kh_end(worker->product_order_sets[gstate->product_id])) {
+                kh_del(om_market_order_set, worker->product_order_sets[gstate->product_id], sit);
+            }
+
             gstate->remaining = 0;
             gstate->active = false;
             return 0;
@@ -1243,9 +1265,18 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
             uint64_t global_match = rec->volume > gstate->remaining
                                         ? gstate->remaining : rec->volume;
 
-            /* 2. Fan-out FIRST (needs pre/post remaining for delta computation) */
+            /* 2. Fan-out FIRST — single dealable() call per org */
             uint64_t pre_remaining = gstate->remaining;
             uint64_t post_remaining = pre_remaining - global_match;
+            OmWalInsert fake = {
+                .order_id = rec->maker_id,
+                .price = gstate->price,
+                .volume = gstate->vol_remain,
+                .vol_remain = gstate->vol_remain,
+                .org = gstate->org,
+                .flags = gstate->flags,
+                .product_id = gstate->product_id,
+            };
             uint32_t start = worker->product_offsets[gstate->product_id];
             uint32_t end = worker->product_offsets[gstate->product_id + 1U];
             for (uint32_t idx = start; idx < end; idx++) {
@@ -1254,10 +1285,9 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
                 if (om_market_worker_find_ladder(worker, viewer_org, gstate->product_id, &ladder_idx) != 0) {
                     continue;
                 }
-                uint64_t pre_qty = om_market_compute_org_qty_with(worker, gstate, rec->maker_id,
-                                                                   viewer_org, pre_remaining);
-                uint64_t post_qty = om_market_compute_org_qty_with(worker, gstate, rec->maker_id,
-                                                                    viewer_org, post_remaining);
+                uint64_t dq = worker->dealable(&fake, viewer_org, worker->dealable_ctx);
+                uint64_t pre_qty = _om_market_qty_from_dq(gstate->vol_remain, dq, pre_remaining);
+                uint64_t post_qty = _om_market_qty_from_dq(gstate->vol_remain, dq, post_remaining);
                 int64_t delta = (int64_t)post_qty - (int64_t)pre_qty;
                 if (delta == 0) {
                     continue;
@@ -1274,6 +1304,16 @@ int om_market_worker_process(OmMarketWorker *worker, OmWalType type, const void 
                               &worker->product_ladders[gstate->product_id],
                               gstate->price, global_match, is_bid);
             gstate->remaining -= global_match;
+
+            /* 4. Remove from per-product order set if fully matched */
+            if (gstate->remaining == 0) {
+                khiter_t sit = kh_get(om_market_order_set,
+                                      worker->product_order_sets[gstate->product_id],
+                                      rec->maker_id);
+                if (sit != kh_end(worker->product_order_sets[gstate->product_id])) {
+                    kh_del(om_market_order_set, worker->product_order_sets[gstate->product_id], sit);
+                }
+            }
             return 0;
         }
         default:
@@ -1405,15 +1445,16 @@ int om_market_worker_get_qty(const OmMarketWorker *worker,
     if (om_market_worker_find_ladder(worker, org_id, product_id, &ladder_idx) != 0) {
         return OM_ERR_NOT_SUBSCRIBED;
     }
-    /* Iterate global_orders, sum per-org qty for matching orders */
+    /* Iterate per-product order set — O(k) instead of O(K) */
+    khash_t(om_market_order_set) *oset = worker->product_order_sets[product_id];
     uint64_t total = 0;
-    for (khiter_t it = kh_begin(worker->global_orders);
-         it != kh_end(worker->global_orders); ++it) {
-        if (!kh_exist(worker->global_orders, it)) continue;
-        uint64_t order_id = kh_key(worker->global_orders, it);
-        const OmMarketOrderState *state = &kh_val(worker->global_orders, it);
-        if (!state->active || state->product_id != product_id ||
-            state->side != side || state->price != price) {
+    for (khiter_t it = kh_begin(oset); it != kh_end(oset); ++it) {
+        if (!kh_exist(oset, it)) continue;
+        uint64_t order_id = kh_key(oset, it);
+        khiter_t git = kh_get(om_market_order_map, worker->global_orders, order_id);
+        if (git == kh_end(worker->global_orders)) continue;
+        const OmMarketOrderState *state = &kh_val(worker->global_orders, git);
+        if (!state->active || state->side != side || state->price != price) {
             continue;
         }
         total += om_market_compute_org_qty(worker, state, order_id, org_id);
@@ -1621,16 +1662,18 @@ int om_market_worker_copy_full(const OmMarketWorker *worker,
         return OM_ERR_NOT_SUBSCRIBED;
     }
 
-    /* Build temp price->qty map by iterating global_orders */
+    /* Build temp price->qty map from per-product order set — O(k) */
     khash_t(om_market_qty_map) *tmp = kh_init(om_market_qty_map);
     if (!tmp) return OM_ERR_HASH_INIT;
 
-    for (khiter_t it = kh_begin(worker->global_orders);
-         it != kh_end(worker->global_orders); ++it) {
-        if (!kh_exist(worker->global_orders, it)) continue;
-        uint64_t order_id = kh_key(worker->global_orders, it);
-        const OmMarketOrderState *state = &kh_val(worker->global_orders, it);
-        if (!state->active || state->product_id != product_id || state->side != side) {
+    khash_t(om_market_order_set) *oset = worker->product_order_sets[product_id];
+    for (khiter_t it = kh_begin(oset); it != kh_end(oset); ++it) {
+        if (!kh_exist(oset, it)) continue;
+        uint64_t order_id = kh_key(oset, it);
+        khiter_t git = kh_get(om_market_order_map, worker->global_orders, order_id);
+        if (git == kh_end(worker->global_orders)) continue;
+        const OmMarketOrderState *state = &kh_val(worker->global_orders, git);
+        if (!state->active || state->side != side) {
             continue;
         }
         uint64_t qty = om_market_compute_org_qty(worker, state, order_id, org_id);
