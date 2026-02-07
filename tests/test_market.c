@@ -1267,6 +1267,454 @@ START_TEST(test_slab_q1_order_after_churn) {
 }
 END_TEST
 
+/* DEACTIVATE currently follows CANCEL semantics; ACTIVATE is a no-op after remaining==0 */
+START_TEST(test_market_deactivate_activate_semantics) {
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) {
+        org_to_worker[i] = 0;
+    }
+    OmMarketSubscription subs[2] = {
+        {.org_id = 1, .product_id = 0},
+        {.org_id = 2, .product_id = 0}
+    };
+    OmMarketConfig cfg = {
+        .max_products = 4,
+        .worker_count = 1,
+        .public_worker_count = 1,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
+        .subs = subs,
+        .sub_count = 2,
+        .expected_orders_per_worker = 8,
+        .expected_subscribers_per_product = 2,
+        .expected_price_levels = 8,
+        .top_levels = 5,
+        .dealable = test_marketable,
+        .dealable_ctx = NULL
+    };
+
+    ck_assert_int_eq(om_market_init(&market, &cfg), 0);
+    OmMarketWorker *w = om_market_worker(&market, 0);
+    OmMarketPublicWorker *pub = &market.public_workers[0];
+
+    OmWalInsert ins = {
+        .order_id = 700,
+        .price = 111,
+        .volume = 25,
+        .vol_remain = 25,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_INSERT, &ins), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &ins), 0);
+
+    uint64_t qty = 0;
+    ck_assert_int_eq(om_market_worker_get_qty(w, 2, 0, OM_SIDE_BID, 111, &qty), 0);
+    ck_assert_uint_eq(qty, 25);
+    ck_assert_int_eq(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 111, &qty), 0);
+    ck_assert_uint_eq(qty, 25);
+
+    OmWalDeactivate deact = {.order_id = 700, .product_id = 0};
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_DEACTIVATE, &deact), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_DEACTIVATE, &deact), 0);
+
+    ck_assert_int_ne(om_market_worker_get_qty(w, 2, 0, OM_SIDE_BID, 111, &qty), 0);
+    ck_assert_int_ne(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 111, &qty), 0);
+
+    OmWalActivate act = {.order_id = 700, .product_id = 0};
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_ACTIVATE, &act), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_ACTIVATE, &act), 0);
+
+    /* Current behavior: no restore after deactivate/cancel */
+    ck_assert_int_ne(om_market_worker_get_qty(w, 2, 0, OM_SIDE_BID, 111, &qty), 0);
+    ck_assert_int_ne(om_market_public_get_qty(pub, 0, OM_SIDE_BID, 111, &qty), 0);
+
+    om_market_destroy(&market);
+}
+END_TEST
+
+START_TEST(test_market_idempotent_state_transitions) {
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) {
+        org_to_worker[i] = 0;
+    }
+    OmMarketSubscription subs[2] = {
+        {.org_id = 1, .product_id = 0},
+        {.org_id = 2, .product_id = 0}
+    };
+    OmMarketConfig cfg = {
+        .max_products = 4,
+        .worker_count = 1,
+        .public_worker_count = 1,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
+        .subs = subs,
+        .sub_count = 2,
+        .expected_orders_per_worker = 8,
+        .expected_subscribers_per_product = 2,
+        .expected_price_levels = 8,
+        .top_levels = 5,
+        .dealable = test_marketable,
+        .dealable_ctx = NULL
+    };
+
+    ck_assert_int_eq(om_market_init(&market, &cfg), 0);
+    OmMarketWorker *w = om_market_worker(&market, 0);
+    OmMarketPublicWorker *pub = &market.public_workers[0];
+
+    OmWalInsert ins = {
+        .order_id = 800,
+        .price = 77,
+        .volume = 20,
+        .vol_remain = 20,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_INSERT, &ins), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &ins), 0);
+
+    ck_assert_int_eq(om_market_worker_clear_deltas(w, 2, 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_public_clear_deltas(pub, 0, OM_SIDE_BID), 0);
+
+    OmWalCancel cancel = {.order_id = 800, .product_id = 0};
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_CANCEL, &cancel), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_CANCEL, &cancel), 0);
+
+    ck_assert_int_eq(om_market_worker_clear_deltas(w, 2, 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_public_clear_deltas(pub, 0, OM_SIDE_BID), 0);
+
+    /* Repeating CANCEL/DEACTIVATE on inactive order should be no-op */
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_CANCEL, &cancel), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_CANCEL, &cancel), 0);
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_DEACTIVATE, &cancel), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_DEACTIVATE, &cancel), 0);
+
+    ck_assert_int_eq(om_market_worker_delta_count(w, 2, 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_public_delta_count(pub, 0, OM_SIDE_BID), 0);
+
+    /* ACTIVATE on already-active order should also be no-op */
+    OmWalInsert ins2 = {
+        .order_id = 801,
+        .price = 78,
+        .volume = 30,
+        .vol_remain = 30,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_INSERT, &ins2), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &ins2), 0);
+    ck_assert_int_eq(om_market_worker_clear_deltas(w, 2, 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_public_clear_deltas(pub, 0, OM_SIDE_BID), 0);
+
+    OmWalActivate act = {.order_id = 801, .product_id = 0};
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_ACTIVATE, &act), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_ACTIVATE, &act), 0);
+    ck_assert_int_eq(om_market_worker_delta_count(w, 2, 0, OM_SIDE_BID), 0);
+    ck_assert_int_eq(om_market_public_delta_count(pub, 0, OM_SIDE_BID), 0);
+
+    om_market_destroy(&market);
+}
+END_TEST
+
+START_TEST(test_market_ring_error_paths) {
+    OmMarketRing ring;
+    OmMarketRingConfig config_bad_pow2 = {
+        .capacity = 7,
+        .consumer_count = 1,
+        .notify_batch = 1
+    };
+    OmMarketRingConfig config_bad_cap = {
+        .capacity = 0,
+        .consumer_count = 1,
+        .notify_batch = 1
+    };
+    OmMarketRingConfig config_bad_consumers = {
+        .capacity = 8,
+        .consumer_count = 0,
+        .notify_batch = 1
+    };
+    OmMarketRingConfig config_ok = {
+        .capacity = 8,
+        .consumer_count = 1,
+        .notify_batch = 1
+    };
+
+    ck_assert_int_eq(om_market_ring_init(NULL, &config_ok), OM_ERR_NULL_PARAM);
+    ck_assert_int_eq(om_market_ring_init(&ring, NULL), OM_ERR_NULL_PARAM);
+    ck_assert_int_eq(om_market_ring_init(&ring, &config_bad_cap), OM_ERR_INVALID_PARAM);
+    ck_assert_int_eq(om_market_ring_init(&ring, &config_bad_consumers), OM_ERR_INVALID_PARAM);
+    ck_assert_int_eq(om_market_ring_init(&ring, &config_bad_pow2), OM_ERR_RING_NOT_POW2);
+
+    ck_assert_int_eq(om_market_ring_init(&ring, &config_ok), 0);
+    ck_assert_int_eq(om_market_ring_register_consumer(&ring, 1), OM_ERR_RING_CONSUMER_ID);
+
+    void *out = NULL;
+    ck_assert_int_eq(om_market_ring_dequeue(&ring, 1, &out), OM_ERR_RING_CONSUMER_ID);
+    ck_assert_int_eq(om_market_ring_dequeue(NULL, 0, &out), OM_ERR_NULL_PARAM);
+    ck_assert_int_eq(om_market_ring_dequeue(&ring, 0, NULL), OM_ERR_NULL_PARAM);
+
+    void *batch_out[1] = {0};
+    ck_assert_int_eq(om_market_ring_dequeue_batch(&ring, 0, batch_out, 0), OM_ERR_INVALID_PARAM);
+    ck_assert_int_eq(om_market_ring_dequeue_batch(&ring, 1, batch_out, 1), OM_ERR_RING_CONSUMER_ID);
+    ck_assert_int_eq(om_market_ring_dequeue_batch(NULL, 0, batch_out, 1), OM_ERR_NULL_PARAM);
+
+    ck_assert_int_eq(om_market_ring_wait(&ring, 0, 0), OM_ERR_INVALID_PARAM);
+    ck_assert_int_eq(om_market_ring_wait(&ring, 1, 1), OM_ERR_RING_CONSUMER_ID);
+    ck_assert_int_eq(om_market_ring_wait(NULL, 0, 1), OM_ERR_NULL_PARAM);
+
+    ck_assert_int_eq(om_market_ring_enqueue(NULL, &ring), OM_ERR_NULL_PARAM);
+    ck_assert_int_eq(om_market_ring_enqueue(&ring, NULL), OM_ERR_NULL_PARAM);
+
+    om_market_ring_destroy(&ring);
+}
+END_TEST
+
+START_TEST(test_market_multi_worker_sharding) {
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) {
+        org_to_worker[i] = 0;
+    }
+    org_to_worker[1] = 0;
+    org_to_worker[3] = 0;
+    org_to_worker[2] = 1;
+    org_to_worker[4] = 1;
+
+    uint32_t product_to_public_worker[4] = {0, 1, 0, 1};
+    OmMarketSubscription subs[] = {
+        {.org_id = 1, .product_id = 0},
+        {.org_id = 3, .product_id = 0},
+        {.org_id = 2, .product_id = 1},
+        {.org_id = 4, .product_id = 1},
+    };
+    OmMarketConfig cfg = {
+        .max_products = 4,
+        .worker_count = 2,
+        .public_worker_count = 2,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = product_to_public_worker,
+        .subs = subs,
+        .sub_count = 4,
+        .expected_orders_per_worker = 8,
+        .expected_subscribers_per_product = 2,
+        .expected_price_levels = 8,
+        .top_levels = 5,
+        .dealable = test_marketable,
+        .dealable_ctx = NULL
+    };
+
+    ck_assert_int_eq(om_market_init(&market, &cfg), 0);
+    OmMarketWorker *w0 = om_market_worker(&market, 0);
+    OmMarketWorker *w1 = om_market_worker(&market, 1);
+    OmMarketPublicWorker *p0 = &market.public_workers[0];
+    OmMarketPublicWorker *p1 = &market.public_workers[1];
+    ck_assert_ptr_nonnull(w0);
+    ck_assert_ptr_nonnull(w1);
+
+    OmWalInsert a = {
+        .order_id = 900,
+        .price = 500,
+        .volume = 10,
+        .vol_remain = 10,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    OmWalInsert b = {
+        .order_id = 901,
+        .price = 600,
+        .volume = 20,
+        .vol_remain = 20,
+        .org = 2,
+        .flags = OM_SIDE_ASK,
+        .product_id = 1
+    };
+
+    ck_assert_int_eq(om_market_worker_process(w0, OM_WAL_INSERT, &a), 0);
+    ck_assert_int_eq(om_market_public_process(p0, OM_WAL_INSERT, &a), 0);
+    ck_assert_int_eq(om_market_worker_process(w1, OM_WAL_INSERT, &b), 0);
+    ck_assert_int_eq(om_market_public_process(p1, OM_WAL_INSERT, &b), 0);
+
+    uint64_t qty = 0;
+    ck_assert_int_eq(om_market_worker_get_qty(w0, 3, 0, OM_SIDE_BID, 500, &qty), 0);
+    ck_assert_uint_eq(qty, 10);
+    ck_assert_int_eq(om_market_worker_get_qty(w1, 4, 1, OM_SIDE_ASK, 600, &qty), 0);
+    ck_assert_uint_eq(qty, 20);
+
+    ck_assert_int_eq(om_market_public_get_qty(p0, 0, OM_SIDE_BID, 500, &qty), 0);
+    ck_assert_uint_eq(qty, 10);
+    ck_assert_int_eq(om_market_public_get_qty(p1, 1, OM_SIDE_ASK, 600, &qty), 0);
+    ck_assert_uint_eq(qty, 20);
+
+    ck_assert_int_eq(om_market_worker_get_qty(w0, 4, 1, OM_SIDE_ASK, 600, &qty), OM_ERR_NOT_SUBSCRIBED);
+    ck_assert_int_eq(om_market_worker_get_qty(w1, 3, 0, OM_SIDE_BID, 500, &qty), OM_ERR_NOT_SUBSCRIBED);
+
+    om_market_destroy(&market);
+}
+END_TEST
+
+START_TEST(test_market_delta_copy_truncation_and_side_isolation) {
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) {
+        org_to_worker[i] = 0;
+    }
+    OmMarketSubscription subs[2] = {
+        {.org_id = 1, .product_id = 0},
+        {.org_id = 2, .product_id = 0}
+    };
+    OmMarketConfig cfg = {
+        .max_products = 4,
+        .worker_count = 1,
+        .public_worker_count = 1,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
+        .subs = subs,
+        .sub_count = 2,
+        .expected_orders_per_worker = 8,
+        .expected_subscribers_per_product = 2,
+        .expected_price_levels = 8,
+        .top_levels = 5,
+        .dealable = test_marketable,
+        .dealable_ctx = NULL
+    };
+
+    ck_assert_int_eq(om_market_init(&market, &cfg), 0);
+    OmMarketWorker *w = om_market_worker(&market, 0);
+    OmMarketPublicWorker *pub = &market.public_workers[0];
+
+    OmWalInsert bid = {
+        .order_id = 1001,
+        .price = 501,
+        .volume = 12,
+        .vol_remain = 12,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    OmWalInsert ask = {
+        .order_id = 1002,
+        .price = 777,
+        .volume = 21,
+        .vol_remain = 21,
+        .org = 1,
+        .flags = OM_SIDE_ASK,
+        .product_id = 0
+    };
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_INSERT, &bid), 0);
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_INSERT, &ask), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &bid), 0);
+    ck_assert_int_eq(om_market_public_process(pub, OM_WAL_INSERT, &ask), 0);
+
+    OmMarketDelta out[2];
+    ck_assert_int_eq(om_market_worker_delta_count(w, 2, 0, OM_SIDE_BID), 1);
+    ck_assert_int_eq(om_market_worker_delta_count(w, 2, 0, OM_SIDE_ASK), 1);
+    ck_assert_int_eq(om_market_worker_copy_deltas(w, 2, 0, OM_SIDE_BID, out, 1), 1);
+    ck_assert_uint_eq(out[0].price, 501);
+    ck_assert_int_eq(out[0].delta, 12);
+    ck_assert_int_eq(om_market_worker_copy_deltas(w, 2, 0, OM_SIDE_ASK, out, 1), 1);
+    ck_assert_uint_eq(out[0].price, 777);
+    ck_assert_int_eq(out[0].delta, 21);
+
+    ck_assert_int_eq(om_market_public_delta_count(pub, 0, OM_SIDE_BID), 1);
+    ck_assert_int_eq(om_market_public_delta_count(pub, 0, OM_SIDE_ASK), 1);
+    ck_assert_int_eq(om_market_public_copy_deltas(pub, 0, OM_SIDE_BID, out, 1), 1);
+    ck_assert_uint_eq(out[0].price, 501);
+    ck_assert_int_eq(out[0].delta, 12);
+    ck_assert_int_eq(om_market_public_copy_deltas(pub, 0, OM_SIDE_ASK, out, 1), 1);
+    ck_assert_uint_eq(out[0].price, 777);
+    ck_assert_int_eq(out[0].delta, 21);
+
+    om_market_destroy(&market);
+}
+END_TEST
+
+START_TEST(test_private_copy_full_mixed_ownership_match_cancel) {
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) {
+        org_to_worker[i] = 0;
+    }
+    OmMarketSubscription subs[3] = {
+        {.org_id = 1, .product_id = 0},
+        {.org_id = 2, .product_id = 0},
+        {.org_id = 3, .product_id = 0}
+    };
+    OmMarketConfig cfg = {
+        .max_products = 4,
+        .worker_count = 1,
+        .public_worker_count = 1,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
+        .subs = subs,
+        .sub_count = 3,
+        .expected_orders_per_worker = 8,
+        .expected_subscribers_per_product = 3,
+        .expected_price_levels = 8,
+        .top_levels = 5,
+        .dealable = test_marketable,
+        .dealable_ctx = NULL
+    };
+
+    ck_assert_int_eq(om_market_init(&market, &cfg), 0);
+    OmMarketWorker *w = om_market_worker(&market, 0);
+
+    OmWalInsert a = {
+        .order_id = 1101,
+        .price = 55,
+        .volume = 100,
+        .vol_remain = 100,
+        .org = 1,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    OmWalInsert b = {
+        .order_id = 1102,
+        .price = 55,
+        .volume = 80,
+        .vol_remain = 80,
+        .org = 2,
+        .flags = OM_SIDE_BID,
+        .product_id = 0
+    };
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_INSERT, &a), 0);
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_INSERT, &b), 0);
+
+    OmMarketDelta full[4];
+    int n = om_market_worker_copy_full(w, 3, 0, OM_SIDE_BID, full, 4);
+    ck_assert_int_eq(n, 1);
+    ck_assert_uint_eq(full[0].price, 55);
+    ck_assert_int_eq(full[0].delta, 180);
+
+    OmWalMatch m = {.maker_id = 1101, .taker_id = 9999, .price = 55, .volume = 40, .product_id = 0};
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_MATCH, &m), 0);
+
+    n = om_market_worker_copy_full(w, 3, 0, OM_SIDE_BID, full, 4);
+    ck_assert_int_eq(n, 1);
+    ck_assert_uint_eq(full[0].price, 55);
+    ck_assert_int_eq(full[0].delta, 140);
+
+    OmWalCancel c = {.order_id = 1102, .product_id = 0};
+    ck_assert_int_eq(om_market_worker_process(w, OM_WAL_CANCEL, &c), 0);
+
+    n = om_market_worker_copy_full(w, 3, 0, OM_SIDE_BID, full, 4);
+    ck_assert_int_eq(n, 1);
+    ck_assert_uint_eq(full[0].price, 55);
+    ck_assert_int_eq(full[0].delta, 60);
+
+    uint64_t qty = 0;
+    ck_assert_int_eq(om_market_worker_get_qty(w, 3, 0, OM_SIDE_BID, 55, &qty), 0);
+    ck_assert_uint_eq(qty, 60);
+
+    om_market_destroy(&market);
+}
+END_TEST
+
 /* Test slab growth: insert more price levels than initial capacity */
 START_TEST(test_market_slab_growth) {
     OmMarket market;
@@ -1353,6 +1801,12 @@ Suite* market_suite(void) {
     tcase_add_test(tc_core, test_private_slab_growth_fanout);
     tcase_add_test(tc_core, test_private_public_different_views);
     tcase_add_test(tc_core, test_slab_q1_order_after_churn);
+    tcase_add_test(tc_core, test_market_deactivate_activate_semantics);
+    tcase_add_test(tc_core, test_market_idempotent_state_transitions);
+    tcase_add_test(tc_core, test_market_ring_error_paths);
+    tcase_add_test(tc_core, test_market_multi_worker_sharding);
+    tcase_add_test(tc_core, test_market_delta_copy_truncation_and_side_isolation);
+    tcase_add_test(tc_core, test_private_copy_full_mixed_ownership_match_cancel);
 
     suite_add_tcase(s, tc_core);
     return s;
