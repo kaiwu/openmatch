@@ -41,8 +41,11 @@ typedef struct OmMarketOrderState {
     uint16_t product_id;
     uint16_t side;
     bool active;
+    uint16_t org;
+    uint16_t flags;
     uint64_t price;
     uint64_t remaining;
+    uint64_t vol_remain;    /**< original vol_remain at insert */
 } OmMarketOrderState;
 
 KHASH_MAP_INIT_INT64(om_market_order_map, OmMarketOrderState)
@@ -144,11 +147,9 @@ typedef struct OmMarketWorker {
     OmMarketLevelSlab product_slab;  /**< Worker-owned slab for product-level price slots */
     OmMarketLadder *product_ladders; /**< Per-product ladders (Q1 queue heads) [max_products] */
     khash_t(om_market_order_map) *global_orders; /**< order_id -> state for product ladder */
-    khash_t(om_market_qty_map) **org_price_qty;  /**< Per-org price->qty [sub_count*2] */
     uint8_t *ladder_dirty;          /**< 64-byte aligned dirty flags */
     khash_t(om_market_delta_map) **ladder_deltas;
     khash_t(om_market_pair_map) *pair_to_ladder;
-    khash_t(om_market_order_map) **orders;
     OmMarketDealableFn dealable;
     void *dealable_ctx;
 } OmMarketWorker;

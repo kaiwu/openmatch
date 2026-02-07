@@ -9,7 +9,8 @@ This document describes how OpenMarket consumes WAL records and builds
 - **Private ladder**: dealable remaining quantity per org at each price level.
 - **Top-N**: the top `N` price levels published per side (bid/ask).
 - **Dealable callback**: `uint64_t dealable(const OmWalInsert *rec, uint16_t viewer_org, void *ctx)`
-  returns the maximum dealable quantity for an org at insert time (0 = not dealable).
+  returns the maximum dealable quantity for an org (0 = not dealable). Called both during
+  WAL ingest (for delta tracking) and at query/publish time (for computing per-org qty).
 
 ## Data Ownership & Sharding
 
@@ -105,8 +106,15 @@ typedef struct OmMarketLadder {
 ### Private Worker (Compute-on-Publish)
 
 The private worker uses a **product-level slab+Q1 ladder** (like the public worker)
-for sorted price structure, plus lightweight **per-org hash maps** (`org_price_qty`)
-for dealable qty per (org, product, side, price). No per-org slabs or Q1 lists.
+for sorted price structure, plus a single `global_orders` map storing per-order state
+(including `org`, `flags`, `vol_remain`). **No per-org state** — per-org dealable qty
+is computed on demand from global state + the dealable callback:
+
+```
+per_org_qty = max(0, min(vol_remain, dealable(rec, viewer)) - (vol_remain - remaining))
+```
+
+Fan-out during ingest is kept only for delta/dirty tracking.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -126,14 +134,9 @@ for dealable qty per (org, product, side, price). No per-org slabs or Q1 lists.
 │   └─ ...                                                        │
 │                                                                 │
 │ global_orders: khash order_id → OmMarketOrderState              │
+│   {order_id → (product_id, side, active, org, flags,            │
+│                price, remaining, vol_remain)}                    │
 │                                                                 │
-│ org_price_qty[ladder_idx*2+side]:  khash price → qty            │
-│   (org0,prod0,bid): {100→50, 95→20}                            │
-│   (org0,prod0,ask): {101→30}                                   │
-│   (org1,prod0,bid): {100→25, 95→10}  ← different dealable qty  │
-│   ...                                                           │
-│                                                                 │
-│ orders[org_idx]: khash order_id → OmMarketOrderState            │
 │ ladder_dirty[]: 64-byte aligned flags                           │
 │ ladder_deltas[]: delta tracking hash maps                       │
 └─────────────────────────────────────────────────────────────────┘
@@ -214,12 +217,10 @@ If new price is likely worse than current worst, start from tail.
 
 **Private (org-level)**
 
-- For each subscribed org in the **private** worker for this product:
-  - Call `dealable(rec, viewer_org)` -> `dq`
-  - If `dq > 0`: add `min(vol_remain, dq)` to the org's ladder (same as public)
-
-The order is stored in per-org order maps and in the public order map so later
-records can resolve price/product/remaining without rescanning the book.
+1. Update product ladder (same as public).
+2. Store `org`, `flags`, `vol_remain` in `global_orders` alongside existing fields.
+3. Fan-out to subscriber orgs: call dealable per viewer, compute qty via formula,
+   record delta + mark dirty. **No per-org order state** is stored.
 
 ### CANCEL / DEACTIVATE (OmWalCancel / OmWalDeactivate)
 
@@ -231,8 +232,10 @@ records can resolve price/product/remaining without rescanning the book.
 
 **Private**
 
-- Each worker checks **all** its per-org order maps.
-- For each org where the order exists, subtract remaining from that org's ladder.
+1. Lookup global order.
+2. **Fan-out FIRST** (needs pre-cancel remaining): iterate product subscribers,
+   compute `pre_qty` via formula, record delta = `-pre_qty`, mark dirty.
+3. **THEN** update product ladder + mark global inactive.
 
 ### ACTIVATE (OmWalActivate)
 
@@ -243,7 +246,9 @@ records can resolve price/product/remaining without rescanning the book.
 
 **Private**
 
-- For each per-org order map that contains the order, re-add remaining.
+1. Lookup global order (inactive, remaining > 0).
+2. Mark active + update product ladder.
+3. Fan-out: compute per-org qty via formula, record delta = `+qty`.
 
 ### MATCH (OmWalMatch)
 
@@ -253,7 +258,10 @@ records can resolve price/product/remaining without rescanning the book.
 
 **Private**
 
-- For each per-org order map that contains the maker order, subtract matched quantity.
+1. Lookup global order, compute `global_match`.
+2. **Fan-out FIRST** (needs pre/post remaining): compute `pre_qty` with current
+   remaining, `post_qty` with `remaining - global_match`, delta = `post_qty - pre_qty`.
+3. **THEN** update product ladder + global remaining.
 
 ## Top-N Publishing
 
@@ -361,7 +369,7 @@ capacity = 10,000 * 50 * 2 * 1.5 = 1,500,000 slots
 memory = 1,500,000 * 64 bytes = 96 MB per private worker
 ```
 
-Per-org qty is stored in `org_price_qty` hash maps (auto-resizing, no slab needed).
+Per-org qty is computed on demand from `global_orders` + dealable callback (no per-org storage).
 
 ## False Sharing Prevention
 
@@ -373,11 +381,14 @@ Per-org qty is stored in `org_price_qty` hash maps (auto-resizing, no slab neede
 
 1. **Size slab appropriately**: Use `expected_price_levels * num_ladders * 2 * 1.5`.
 2. **Make dealable fast**: simple bit checks, precomputed org/product rules, no I/O.
+   The callback is invoked at both ingest and query time — keep it under ~5ns.
 3. **Batch WAL processing**: process 256-1024 records per batch.
-4. **Preallocate hash maps**: size order maps and price_to_slot maps to avoid rehash.
+4. **Preallocate hash maps**: size `global_orders` and `price_to_slot` maps to avoid rehash.
 5. **Right-size workers**: balance load across workers to avoid hotspots.
 6. **Prefer full snapshot over delta** when most levels change each tick.
 7. **Insert position hint**: track whether new orders tend to be at best or spread out.
+8. **Limit active orders**: `get_qty()` and `copy_full()` iterate all active orders
+   in `global_orders`. Keep active order count reasonable per worker (~100K).
 
 ## Capacity Planning
 
@@ -416,19 +427,18 @@ Phase 1 (product-level, once per record):
 | `kh_put(global_orders)` | ~35ns |
 | **Total per record** | **~65ns** |
 
-Phase 2 (per-org fan-out):
+Phase 2 (per-org fan-out, delta/dirty tracking only):
 
 | Operation | Cost |
 |-----------|------|
 | `find_ladder()` (array indexed) | ~10ns |
 | `dealable()` callback | ~5ns |
-| `kh_put(order_map)` per org | ~15ns |
-| `kh_put(org_price_qty)` hash | ~5ns |
 | Delta map update | ~5ns |
-| **Total per org** | **~40ns** |
+| Dirty flag | ~1ns |
+| **Total per org** | **~25ns** |
 
-With L2/L3 cache pressure from large working sets: **40-60ns per org realistic**
-(down from 150-200ns: no per-org slab alloc, no Q1 insert walk).
+With L2/L3 cache pressure from large working sets: **25-40ns per org realistic**.
+No per-org order maps or qty maps — dealable qty is computed on demand at query time.
 
 ### Public Worker Sizing
 
@@ -449,7 +459,8 @@ total ≈ 75 MB per public worker
 ### Private Worker Sizing (Compute-on-Publish)
 
 Each private worker reads ALL WAL records, updates a product-level ladder (once),
-then fans out dealable qty to per-org hash maps (~40ns/org).
+then fans out delta/dirty tracking to subscriber orgs (~25ns/org). Per-org qty
+is computed on demand at query/publish time from global state + dealable callback.
 
 ```
 records_in_window = R × T = 1,000,000 × 0.5 = 500,000
@@ -460,126 +471,71 @@ Per record, each worker fans out to O/W orgs:
 ```
 constraint: 65ns + (O / W) × cost_per_org ≤ 1000ns
 
-Optimistic  (40ns/org):  W ≥ 5,000 × 40 / 935 = 214
-Realistic   (50ns/org):  W ≥ 5,000 × 50 / 935 = 267
-Pessimistic (60ns/org):  W ≥ 5,000 × 60 / 935 = 321
+Optimistic  (25ns/org):  W ≥ 5,000 × 25 / 935 = 134
+Realistic   (30ns/org):  W ≥ 5,000 × 30 / 935 = 160
+Pessimistic (40ns/org):  W ≥ 5,000 × 40 / 935 = 214
 ```
 
 Example: 10 workers, 500 orgs each:
 ```
-per record:  65ns + 500 × 50ns = 25μs
-per window:  500,000 × 25μs = 12.5s  (25× over budget → need ~270 workers)
+per record:  65ns + 500 × 30ns = 15μs
+per window:  500,000 × 15μs = 7.5s  (15× over budget → need ~160 workers)
 ```
 
 Memory (constant regardless of W, total across all workers):
 ```
 product_slab: P × L × 2 × 64 bytes = 10K × 20 × 2 × 64 =  25 MB per worker
-org_price_qty: S × ~40 bytes                              ≈   2 GB total
-orders: O × avg_active_orders × 40 bytes                  ≈   few GB
+global_orders: avg_active_orders × ~56 bytes               ≈  few hundred MB
 ────────────────────────────────────────────────────────────────
-total private                                             ≈  10 GB
+total private                                             ≈   5 GB
 ```
+
+Query cost at publish time: `get_qty()` and `copy_full()` iterate `global_orders`
+and call `dealable()` per order, so are O(active_orders) per call. This is acceptable
+for periodic publish (1s intervals) but not suitable for per-record hot-path queries.
 
 ### Scaling Improvement vs Old Design
 
 The old design used per-org slabs + Q1 ladders at ~150ns/org, requiring ~750
-workers and ~250 GB RAM. The new design eliminates per-org slabs entirely:
-- **Workers**: ~270 (down from ~750, ~2.8x reduction)
-- **Memory**: ~10 GB (down from ~250 GB, ~25x reduction)
-- **Per-org cost**: ~40-60ns (down from ~150-200ns, ~3x reduction)
-
-### Alternative: Compute-on-Publish
-
-Instead of fanning out per-org counters at WAL ingestion time:
-
-1. **WAL processing** — same as public worker (no per-org fan-out):
-   - Update public ladder
-   - Record per-order state keyed by `order_id` (includes org_id, product, side, price, remaining)
-   - Optional: maintain per-org aggregated qty-at-price maps for faster publish
-   - Per record: ~200ns (public ladder update + order hash put)
-   - **2-3 WAL workers** handle 1M/s
-
-2. **At publish time**, compute private view on demand:
-   ```
-   for each (org, product) subscription:
-       walk public top-N (N levels)
-       for each level: private_qty = public_qty - self_qty_at_price(org, product, side, price)
-   ```
-   - If `self_qty_at_price` comes from a per-org map: O(1) per price level
-   - If derived by scanning org orders: O(k) per price (k = orders at that price)
-   - With O(1) self-qty: cost ≈ N × ~10ns per subscription
-
-3. **Memory**: only per-org order state, no per-org slab/ladders
-   - Public slab: ~25 MB per public worker
-   - Per-org order sets: 5,000 orgs × active_orders × ~40 bytes ≈ few GB
-   - Optional per-org price maps: +O(active_price_levels)
-   - **Total ≈ 30 GB**
-
-#### Compute-on-Publish Cost Model
-
-Let:
-- `R` = WAL records per second
-- `T` = aggregation window in seconds
-- `S` = subscriptions (org × product)
-- `N` = top levels published per side
-- `C_wal` = cost per record (ns)
-- `C_pub` = cost per subscription per level (ns)
-
-**WAL workers**
-```
-W_wal ≥ (R × C_wal) / (T × 1e9)
-```
-
-**Publish workers**
-```
-W_publish ≥ (S × N × C_pub) / (T × 1e9)
-```
-
-**Reference scenario** (R=1M/s, T=0.5s, S=50M, N=20, C_wal=200ns, C_pub=10ns):
-```
-W_wal     ≥ (1e6 × 200) / (0.5 × 1e9) = 0.4  → 1 worker
-W_publish ≥ (50e6 × 20 × 10) / (0.5 × 1e9) = 20 workers
-```
+workers and ~250 GB RAM. The current design eliminates ALL per-org state:
+- **Workers**: ~160 (down from ~750, ~4.7x reduction)
+- **Memory**: ~5 GB (down from ~250 GB, ~50x reduction)
+- **Per-org cost**: ~25-40ns (down from ~150-200ns, ~5x reduction)
 
 ### Comparison
 
-The current implementation uses a hybrid approach: product-level slab+Q1 ladder
-for sorted price structure, with per-org hash maps for dealable qty. This avoids
-the O(R x O x 150ns) cost of per-org slab+Q1 ladders.
+The current implementation uses compute-on-publish: product-level slab+Q1 ladder
+for sorted price structure, with per-org qty computed on demand from `global_orders`
++ dealable callback. This avoids all per-org state at ingest time.
 
-| | Old (Per-org Slabs) | Current (Product Slab + OrgPriceQty) | Full Compute-on-Publish |
+| | Old (Per-org Slabs) | Hybrid (Product Slab + OrgPriceQty) | **Current (Compute-on-Publish)** |
 |---|---|---|---|
-| WAL workers | ~750 | ~270 | 2-3 |
-| Publish workers | 0 (pre-computed) | 0 (pre-computed) | 20 |
-| **Total workers** | **~750** | **~270** | **~25** |
-| **Memory** | **~250 GB** | **~10 GB** | **~30 GB** |
-| Per-org cost | ~150ns | ~40ns | 0 (at ingest) |
-| Private read | O(1) hash | O(1) hash | O(N) compute |
-| Publish | O(N) Q1 walk | O(N) Q1 walk + filter | O(N) compute |
-| Complexity | Per-org slab+Q1 | Product slab + hash maps | Per-org order set only |
+| WAL workers | ~750 | ~270 | ~160 |
+| Publish workers | 0 (pre-computed) | 0 (pre-computed) | 0 (computed on query) |
+| **Total workers** | **~750** | **~270** | **~160** |
+| **Memory** | **~250 GB** | **~10 GB** | **~5 GB** |
+| Per-org ingest cost | ~150ns | ~40ns | ~25ns (delta/dirty only) |
+| Private read | O(1) hash | O(1) hash | O(active_orders) compute |
+| Publish | O(N) Q1 walk | O(N) Q1 walk + filter | O(N) Q1 walk + compute |
+| Per-org state | slab+Q1+orders | qty maps + orders | **none** |
 
 ### Quick Sizing Formula
 
-For current design (product slab + org_price_qty):
+For current design (compute-on-publish):
 ```
-W_private ≥ (65ns + O/W × 50ns) × R / 1e9
+W_private ≥ (65ns + O/W × 30ns) × R / 1e9
 
 Example: 50 orgs, 1M/s WAL, 0.5s budget
-  per record: 65 + 50 × 50 = 2565ns
-  W ≥ 2565ns × 1M / 0.5s ≈ 6 workers
+  per record: 65 + 50 × 30 = 1565ns
+  W ≥ 1565ns × 1M / 0.5s ≈ 4 workers
 
 Example: 5000 orgs, 1M/s WAL, 0.5s budget
-  W ≥ 5000 × 50 / (1000 - 65) ≈ 268 workers
+  W ≥ 5000 × 30 / (1000 - 65) ≈ 161 workers
 ```
 
-For full compute-on-publish (future optimization):
-```
-W_wal     = R × cost_per_record / T = 1M × 200ns / 0.5 ≈ 1 worker
-W_publish = S × cost_per_sub / T    = S × 200ns / T
-
-Example: 50M subs, 0.5s budget
-  W_publish = 50M × 200ns / 0.5 = 20 workers
-```
+Note: query-time cost (`get_qty`, `copy_full`) is O(active_orders) per call
+since it iterates `global_orders` and calls dealable() per matching order. This
+is acceptable for periodic publish but not for per-record queries.
 
 ## Two-Phase Coordination (Private Workers)
 
@@ -587,17 +543,20 @@ Private workers process WAL records in two phases within a single thread:
 
 **Phase 1 — Ingest** (once per WAL record):
 1. Update product-level ladder (`product_slab` + `product_ladders[product_id]`)
-2. Record order state in `global_orders` (order_id -> product/side/price/remaining)
+2. Record order state in `global_orders` (order_id -> product/side/price/remaining/org/flags/vol_remain)
 
-**Phase 2 — Fan-out** (per subscriber org):
-1. Call `dealable(rec, viewer_org)` -> dq
-2. If dq > 0: record per-org order, update `org_price_qty[ladder_idx*2+side]`
-3. Record delta, mark dirty
+**Phase 2 — Fan-out** (per subscriber org, delta/dirty tracking only):
+1. Compute per-org qty via `om_market_compute_org_qty()` using the formula:
+   `per_org_qty = max(0, min(vol_remain, dealable(rec, viewer)) - (vol_remain - remaining))`
+2. Record delta, mark dirty
+3. **No per-org state is stored** — qty is computed from global state
 
-**At publish time** — query uses both structures:
-- `get_qty()`: direct lookup in `org_price_qty` hash map
-- `copy_full()`: walk `product_ladders[product_id]` Q1 (sorted), filter by
-  `org_price_qty` at each price level (skip prices with zero org qty)
+**Critical ordering for CANCEL/MATCH**: fan-out must happen BEFORE updating global
+state, because the formula needs the pre-operation `remaining` value.
+
+**At publish time** — query computes per-org qty on demand:
+- `get_qty()`: iterates `global_orders`, sums computed per-org qty for matching orders
+- `copy_full()`: builds temp price->qty map from `global_orders`, then walks Q1 ladder
 
 Within a single worker, the two phases are implicit (sequential in the same thread).
 Cross-worker coordination is not needed because each worker owns its own data
@@ -614,5 +573,8 @@ The slab + intrusive queue design mirrors OpenMatch's architecture:
 - Bounded memory, no memmove, O(N) publish
 - Slab growth via realloc when capacity exceeded (indices survive)
 
-For large-scale deployments (>100 orgs), consider compute-on-publish for private
-ladders to avoid O(R × O) fan-out cost.
+The current design uses compute-on-publish for private ladders: per-org dealable
+qty is computed on demand from global order state + dealable callback, eliminating
+all per-org storage. Fan-out during ingest is kept only for delta/dirty tracking
+(~25ns/org vs ~40ns/org with per-org hash maps). Trade-off: query-time cost is
+O(active_orders) per call instead of O(1) hash lookup.
