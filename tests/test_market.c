@@ -546,6 +546,8 @@ START_TEST(test_market_dynamic_ladder_ask) {
 
     ck_assert_int_eq(om_market_init(&market, &cfg), 0);
     OmMarketPublicWorker *pub = &market.public_workers[0];
+    ck_assert_ptr_nonnull(pub->slab.slots);
+    ck_assert_uint_eq((uintptr_t)pub->slab.slots % 64U, 0U);
 
     /* Insert 4 ask orders at prices 10, 20, 30, 40 */
     OmWalInsert orders[4] = {
@@ -1771,6 +1773,7 @@ START_TEST(test_market_slab_growth) {
     ck_assert_int_eq(n, 100);
     ck_assert_uint_eq(full[0].price, 1099);  /* Best bid (highest) */
     ck_assert_uint_eq(full[99].price, 1000); /* Worst bid (lowest) */
+    ck_assert_uint_eq((uintptr_t)pub->slab.slots % 64U, 0U);
 
     om_market_destroy(&market);
 }

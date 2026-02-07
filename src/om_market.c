@@ -128,17 +128,19 @@ static int om_market_slab_grow(OmMarketLevelSlab *slab) {
         new_cap = old_cap + 64;  /* Minimum growth */
     }
 
-    /* Realloc slots array - indices remain valid */
-    OmMarketLevelSlot *new_slots = realloc(slab->slots, new_cap * sizeof(OmMarketLevelSlot));
+    /* Grow with cache-line aligned allocation - indices remain valid */
+    OmMarketLevelSlot *new_slots =
+        om_aligned_calloc(new_cap, sizeof(OmMarketLevelSlot));
     if (!new_slots) {
         return OM_ERR_ALLOC_FAILED;
     }
+    memcpy(new_slots, slab->slots, (size_t)old_cap * sizeof(OmMarketLevelSlot));
+    free(slab->slots);
     slab->slots = new_slots;
 
     /* Initialize new slots and link into Q0 free list */
     for (uint32_t i = old_cap; i < new_cap; i++) {
         OmMarketLevelSlot *slot = &slab->slots[i];
-        memset(slot, 0, sizeof(*slot));
         slot->q0_prev = (i == old_cap) ? slab->q0_tail : (i - 1);
         slot->q0_next = (i == new_cap - 1) ? OM_MARKET_SLOT_NULL : (i + 1);
         slot->q1_prev = OM_MARKET_SLOT_NULL;
