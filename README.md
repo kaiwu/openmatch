@@ -1,8 +1,10 @@
 # OpenMatch
 
 Low-latency, single-threaded matching core in C11 with a cache-friendly slab
-allocator, orderbook, and durable WAL replay. Built for HFT‑style workloads,
-but small and embeddable.
+allocator, orderbook, and durable WAL replay. Includes **OpenMarket**, a
+market data aggregation layer that consumes WAL records and builds public
+(total qty) and private (per-org dealable qty) price ladders. Built for
+HFT‑style workloads, but small and embeddable.
 
 ## Features
 
@@ -18,16 +20,20 @@ but small and embeddable.
 
 ```
 .
-├── include/openmatch/        # Public headers
-│   ├── om_slab.h             # Dual slab allocator + slot layout
-│   ├── orderbook.h           # Orderbook API
-│   ├── om_hash.h             # Hashmap (khash/khashl)
-│   ├── om_wal.h              # WAL API + replay
-│   ├── om_perf.h             # Performance presets
-│   ├── om_engine.h           # Matching engine API
-│   └── om_wal_mock.h         # WAL mock (prints to stderr)
+├── include/
+│   ├── openmatch/            # Matching engine headers
+│   │   ├── om_slab.h         # Dual slab allocator + slot layout
+│   │   ├── orderbook.h       # Orderbook API
+│   │   ├── om_hash.h         # Hashmap (khash/khashl)
+│   │   ├── om_wal.h          # WAL API + replay
+│   │   ├── om_perf.h         # Performance presets
+│   │   ├── om_engine.h       # Matching engine API
+│   │   └── om_wal_mock.h     # WAL mock (prints to stderr)
+│   └── openmarket/           # Market data headers
+│       └── om_market.h       # Public/private ladder aggregation
 ├── src/                      # Implementations
-│   └── om_engine.c           # Matching engine
+│   ├── om_engine.c           # Matching engine
+│   └── om_market.c           # Market data aggregation
 ├── tests/                    # check-based unit tests
 ├── tools/                    # Utility binaries + awk helpers
 │   ├── wal_reader.c
@@ -168,8 +174,25 @@ Order deactivation/activation:
 
 ### Market Data (OpenMarket)
 
-See [docs/market_data.md](docs/market_data.md) for aggregation flow, public/private ladders,
-and per‑record behavior.
+Aggregates WAL records into publishable market data ladders. Two worker types:
+
+- **Public workers** (product-sharded): total remaining qty at each price level.
+  Simple hash-lookup aggregation, ~90ns per WAL record.
+- **Private workers** (org-sharded): per-org dealable qty via a `dealable()` callback.
+  Compute-on-publish design — no per-org state stored, qty derived on demand from
+  global order state. Fan-out cost ~15-25ns/org depending on record type.
+
+Key data structures per private worker:
+
+- `product_slab` + `product_ladders[]`: sorted price levels (32-byte slots, Q1 queue)
+- `global_orders`: order_id → state (product, side, price, remaining, org, flags)
+- `product_order_sets[]`: per-product order_id sets for O(k) queries
+- Delta maps + dirty flags for incremental publish
+
+Publishing modes: **delta** (only changed levels) or **full snapshot** (top-N walk).
+
+See [docs/market_data.md](docs/market_data.md) for detailed aggregation flow,
+capacity planning, and per-record cost model.
 
 ## Example (Minimal)
 
