@@ -99,8 +99,10 @@ add_library(ombus_shared SHARED ${OMBUS_SOURCES})
 add_library(ombus_static STATIC ${OMBUS_SOURCES})
 add_library(ombus ALIAS ombus_shared)
 
-target_link_libraries(ombus_shared rt)
-target_link_libraries(ombus_static rt)
+if(NOT APPLE)
+    target_link_libraries(ombus_shared rt)
+    target_link_libraries(ombus_static rt)
+endif()
 
 target_include_directories(ombus_shared
     PUBLIC

@@ -15,6 +15,8 @@
 static inline void _om_bus_cpu_relax(void) {
 #if defined(__x86_64__) || defined(__i386__)
     __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+    __asm__ volatile("yield" ::: "memory");
 #endif
 }
 

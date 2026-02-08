@@ -73,6 +73,7 @@ Two artifacts built as shared (.so) and static (.a) libraries:
 ## Code Style
 
 - C11 with POSIX extensions
+- Cross compile for MacOS 10.12+ too
 - 4-space indent, 100-char lines, K&R braces
 - Types: `Om<Component><Type>` (e.g., `OmSlabSlot`, `OmMarketWorker`)
 - Functions: `om_<module>_<verb>()` (e.g., `om_slab_alloc()`)

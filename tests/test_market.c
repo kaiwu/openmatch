@@ -1780,7 +1780,7 @@ START_TEST(test_market_slab_growth) {
 END_TEST
 
 Suite* market_suite(void) {
-    Suite *s = suite_create("market");
+    Suite *s = suite_create("Market");
     TCase *tc_core = tcase_create("core");
     tcase_add_test(tc_core, test_market_struct_sizes);
     tcase_add_test(tc_core, test_market_slab_growth);
