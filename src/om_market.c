@@ -17,10 +17,18 @@ static void *om_aligned_calloc(size_t count, size_t size) {
     }
     /* Round up to cache line boundary */
     size_t aligned_size = (total + OM_CACHE_LINE_SIZE - 1) & ~(OM_CACHE_LINE_SIZE - 1);
-    void *ptr = aligned_alloc(OM_CACHE_LINE_SIZE, aligned_size);
-    if (ptr) {
-        memset(ptr, 0, aligned_size);
+    void *ptr = NULL;
+#if defined(__APPLE__)
+    if (posix_memalign(&ptr, OM_CACHE_LINE_SIZE, aligned_size) != 0) {
+        return NULL;
     }
+#else
+    ptr = aligned_alloc(OM_CACHE_LINE_SIZE, aligned_size);
+    if (!ptr) {
+        return NULL;
+    }
+#endif
+    memset(ptr, 0, aligned_size);
     return ptr;
 }
 
