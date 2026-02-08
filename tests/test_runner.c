@@ -6,6 +6,7 @@ Suite* orderbook_suite(void);
 Suite* wal_suite(void);
 Suite* engine_suite(void);
 Suite* market_suite(void);
+Suite* bus_suite(void);
 
 int main(void) {
     int number_failed;
@@ -14,7 +15,8 @@ int main(void) {
     srunner_add_suite(sr, wal_suite());
     srunner_add_suite(sr, engine_suite());
     srunner_add_suite(sr, market_suite());
-    
+    srunner_add_suite(sr, bus_suite());
+
     srunner_run_all(sr, CK_NORMAL);
     number_failed = srunner_ntests_failed(sr);
     srunner_free(sr);

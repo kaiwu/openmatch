@@ -1,0 +1,183 @@
+#ifndef OM_BUS_H
+#define OM_BUS_H
+
+/**
+ * @file om_bus.h
+ * @brief SHM transport for WAL record distribution across process boundaries
+ *
+ * Provides a shared-memory ring buffer that carries inline WAL record data
+ * (not pointers) so consumers in separate processes can read records via mmap.
+ *
+ * Producer: OmBusStream  — creates SHM, publishes records
+ * Consumer: OmBusEndpoint — attaches to SHM, polls records
+ */
+
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "om_bus_error.h"
+
+/* ============================================================================
+ * Constants
+ * ============================================================================ */
+
+#define OM_BUS_SHM_MAGIC       0x4F4D4253U  /* "OMBS" */
+#define OM_BUS_SHM_VERSION     1U
+#define OM_BUS_HEADER_PAGE     4096U
+#define OM_BUS_SLOT_HEADER_SIZE 24U
+#define OM_BUS_CONSUMER_ALIGN  64U
+#define OM_BUS_DEFAULT_SLOT_SIZE    256U
+#define OM_BUS_DEFAULT_CAPACITY     4096U
+#define OM_BUS_DEFAULT_MAX_CONSUMERS 8U
+
+#define OM_BUS_FLAG_CRC        0x1U  /* Enable CRC32 on publish/poll */
+
+/* ============================================================================
+ * Slot Header (24 bytes) — sits at the start of each ring slot
+ * ============================================================================ */
+
+typedef struct OmBusSlotHeader {
+    _Atomic uint64_t seq;       /* Monotonic slot sequence; publish fence */
+    uint64_t wal_seq;           /* WAL sequence number */
+    uint8_t  wal_type;          /* OmWalType enum value */
+    uint8_t  reserved;          /* Alignment padding */
+    uint16_t payload_len;       /* Payload byte count */
+    uint32_t crc32;             /* CRC32 of payload bytes */
+} OmBusSlotHeader;
+
+/* ============================================================================
+ * SHM Header (4096 bytes, page-aligned) — first page of SHM file
+ * ============================================================================ */
+
+typedef struct OmBusShmHeader {
+    uint32_t magic;             /* 0x4F4D4253 ("OMBS") */
+    uint32_t version;           /* Protocol version (1) */
+    uint32_t slot_size;         /* Bytes per slot (default 256) */
+    uint32_t capacity;          /* Number of slots (power of two) */
+    uint32_t max_consumers;     /* Maximum consumer count */
+    uint32_t flags;             /* Feature flags (OM_BUS_FLAG_CRC, etc.) */
+    _Atomic uint64_t head;      /* Producer head position */
+    _Atomic uint64_t min_tail;  /* Cached minimum consumer tail */
+    char stream_name[64];       /* Null-terminated stream name */
+    uint8_t _pad[OM_BUS_HEADER_PAGE - 104];
+} OmBusShmHeader;
+
+/* ============================================================================
+ * Consumer Tail (64 bytes, cache-line aligned) — one per consumer slot
+ * ============================================================================ */
+
+typedef struct OmBusConsumerTail {
+    _Atomic uint64_t tail;      /* Consumer read position */
+    _Atomic uint64_t wal_seq;   /* Last WAL sequence consumed */
+    uint8_t _pad[48];           /* Pad to 64 bytes (cache line) */
+} OmBusConsumerTail;
+
+/* ============================================================================
+ * Output record — delivered to consumers
+ * ============================================================================ */
+
+typedef struct OmBusRecord {
+    uint64_t    wal_seq;        /* WAL sequence number */
+    uint8_t     wal_type;       /* OmWalType enum value */
+    uint16_t    payload_len;    /* Payload byte count */
+    const void *payload;        /* Pointer to payload data */
+} OmBusRecord;
+
+/* ============================================================================
+ * Stream (Producer) API
+ * ============================================================================ */
+
+typedef struct OmBusStreamConfig {
+    const char *stream_name;    /* SHM object name (e.g., "/om-bus-engine-0") */
+    uint32_t    capacity;       /* Ring capacity, power of two (default 4096) */
+    uint32_t    slot_size;      /* Bytes per slot (default 256) */
+    uint32_t    max_consumers;  /* Maximum consumer count (default 8) */
+    uint32_t    flags;          /* Feature flags (OM_BUS_FLAG_CRC, etc.) */
+} OmBusStreamConfig;
+
+typedef struct OmBusStream OmBusStream;
+
+/**
+ * Create a new SHM stream (producer side).
+ * Creates the shared memory file and initializes the ring.
+ * @param out    Output stream handle
+ * @param config Stream configuration
+ * @return 0 on success, negative on error
+ */
+int om_bus_stream_create(OmBusStream **out, const OmBusStreamConfig *config);
+
+/**
+ * Publish a WAL record to the stream.
+ * Copies payload into the next ring slot. Blocks (spins) if ring is full.
+ * @param stream  Stream handle
+ * @param wal_seq WAL sequence number
+ * @param wal_type OmWalType enum value
+ * @param payload Raw WAL record data
+ * @param len     Payload byte count
+ * @return 0 on success, OM_ERR_BUS_RECORD_TOO_LARGE if len > slot_size - 24
+ */
+int om_bus_stream_publish(OmBusStream *stream, uint64_t wal_seq,
+                          uint8_t wal_type, const void *payload, uint16_t len);
+
+/**
+ * Destroy stream and unlink SHM object.
+ * @param stream Stream handle (NULL-safe)
+ */
+void om_bus_stream_destroy(OmBusStream *stream);
+
+/* ============================================================================
+ * Endpoint (Consumer) API
+ * ============================================================================ */
+
+typedef struct OmBusEndpointConfig {
+    const char *stream_name;    /* SHM object name to attach to */
+    uint32_t    consumer_index; /* Pre-assigned consumer index */
+    bool        zero_copy;      /* If true, payload points into mmap region */
+} OmBusEndpointConfig;
+
+typedef struct OmBusEndpoint OmBusEndpoint;
+
+/**
+ * Open an endpoint to an existing SHM stream (consumer side).
+ * Maps the shared memory file.
+ * @param out    Output endpoint handle
+ * @param config Endpoint configuration
+ * @return 0 on success, negative on error
+ */
+int om_bus_endpoint_open(OmBusEndpoint **out, const OmBusEndpointConfig *config);
+
+/**
+ * Poll for the next record. Non-blocking.
+ * @param ep  Endpoint handle
+ * @param rec Output record (payload pointer valid until next poll or close)
+ * @return 1 if record available, 0 if empty, negative on error
+ *         OM_ERR_BUS_CRC_MISMATCH if CRC check fails
+ */
+int om_bus_endpoint_poll(OmBusEndpoint *ep, OmBusRecord *rec);
+
+/**
+ * Poll up to max_count records in a batch. Non-blocking.
+ * @param ep        Endpoint handle
+ * @param recs      Output record array
+ * @param max_count Maximum records to return
+ * @return Number of records read (0 = empty), negative on error
+ */
+int om_bus_endpoint_poll_batch(OmBusEndpoint *ep, OmBusRecord *recs,
+                               size_t max_count);
+
+/**
+ * Get current WAL sequence position for this endpoint.
+ * @param ep Endpoint handle
+ * @return Last consumed WAL sequence number
+ */
+uint64_t om_bus_endpoint_wal_seq(const OmBusEndpoint *ep);
+
+/**
+ * Close endpoint and unmap SHM.
+ * @param ep Endpoint handle (NULL-safe)
+ */
+void om_bus_endpoint_close(OmBusEndpoint *ep);
+
+#endif /* OM_BUS_H */

@@ -91,3 +91,43 @@ install(TARGETS openmatch_shared openmatch_static openmarket_shared openmarket_s
     ARCHIVE DESTINATION lib
     PUBLIC_HEADER DESTINATION include
 )
+
+# ---------- ombus (message bus) ----------
+set(OMBUS_SOURCES om_bus_shm.c)
+
+add_library(ombus_shared SHARED ${OMBUS_SOURCES})
+add_library(ombus_static STATIC ${OMBUS_SOURCES})
+add_library(ombus ALIAS ombus_shared)
+
+target_link_libraries(ombus_shared rt)
+target_link_libraries(ombus_static rt)
+
+target_include_directories(ombus_shared
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(ombus_static
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
+set_target_properties(ombus_shared PROPERTIES
+    OUTPUT_NAME ombus
+    VERSION ${PROJECT_VERSION}
+    SOVERSION 1
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/ombus/om_bus.h;${CMAKE_SOURCE_DIR}/include/ombus/om_bus_error.h"
+)
+
+set_target_properties(ombus_static PROPERTIES
+    OUTPUT_NAME ombus
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/ombus/om_bus.h;${CMAKE_SOURCE_DIR}/include/ombus/om_bus_error.h"
+)
+
+install(TARGETS ombus_shared ombus_static
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+    PUBLIC_HEADER DESTINATION include/ombus
+)
