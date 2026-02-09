@@ -22,6 +22,14 @@ typedef enum OmBusError {
     OM_ERR_BUS_CRC_MISMATCH     = -809, /**< Payload CRC32 mismatch */
     OM_ERR_BUS_GAP_DETECTED     = -810, /**< WAL sequence gap detected */
     OM_ERR_BUS_EMPTY            = -811, /**< No record available */
+    OM_ERR_BUS_TCP_BIND         = -812, /**< TCP bind/listen failed */
+    OM_ERR_BUS_TCP_CONNECT      = -813, /**< TCP connect failed */
+    OM_ERR_BUS_TCP_SEND         = -814, /**< TCP send failed */
+    OM_ERR_BUS_TCP_RECV         = -815, /**< TCP recv failed */
+    OM_ERR_BUS_TCP_DISCONNECTED = -816, /**< TCP peer disconnected */
+    OM_ERR_BUS_TCP_PROTOCOL     = -817, /**< TCP frame magic mismatch */
+    OM_ERR_BUS_TCP_IO           = -818, /**< TCP poll() error */
+    OM_ERR_BUS_TCP_MAX_CLIENTS  = -819, /**< TCP max clients reached */
 } OmBusError;
 
 /**
@@ -45,6 +53,14 @@ static inline const char *om_bus_error_string(int err) {
         case OM_ERR_BUS_CRC_MISMATCH:    return "Payload CRC32 mismatch";
         case OM_ERR_BUS_GAP_DETECTED:    return "WAL sequence gap detected";
         case OM_ERR_BUS_EMPTY:           return "No record available";
+        case OM_ERR_BUS_TCP_BIND:        return "TCP bind/listen failed";
+        case OM_ERR_BUS_TCP_CONNECT:     return "TCP connect failed";
+        case OM_ERR_BUS_TCP_SEND:        return "TCP send failed";
+        case OM_ERR_BUS_TCP_RECV:        return "TCP recv failed";
+        case OM_ERR_BUS_TCP_DISCONNECTED: return "TCP peer disconnected";
+        case OM_ERR_BUS_TCP_PROTOCOL:    return "TCP frame magic mismatch";
+        case OM_ERR_BUS_TCP_IO:          return "TCP poll() error";
+        case OM_ERR_BUS_TCP_MAX_CLIENTS: return "TCP max clients reached";
         default:                         return "Unknown bus error";
     }
 }

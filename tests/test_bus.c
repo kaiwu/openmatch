@@ -1,12 +1,16 @@
+#include <arpa/inet.h>
 #include <check.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include "ombus/om_bus.h"
+#include "ombus/om_bus_tcp.h"
 #include "ombus/om_bus_wal.h"
 #include "ombus/om_bus_market.h"
 #include "openmatch/om_engine.h"
@@ -722,6 +726,343 @@ START_TEST(test_bus_worker_roundtrip) {
 END_TEST
 
 /* ============================================================================
+ * TCP Transport Tests
+ * ============================================================================ */
+
+/* Helper: create server on ephemeral port, return server + port */
+static OmBusTcpServer *tcp_test_server(uint32_t max_clients, uint32_t send_buf_size) {
+    OmBusTcpServerConfig cfg = {
+        .bind_addr = "127.0.0.1",
+        .port = 0,
+        .max_clients = max_clients ? max_clients : 64,
+        .send_buf_size = send_buf_size ? send_buf_size : 256 * 1024,
+    };
+    OmBusTcpServer *srv = NULL;
+    ck_assert_int_eq(om_bus_tcp_server_create(&srv, &cfg), 0);
+    ck_assert_ptr_nonnull(srv);
+    return srv;
+}
+
+static OmBusTcpClient *tcp_test_client(uint16_t port, uint32_t recv_buf_size) {
+    OmBusTcpClientConfig cfg = {
+        .host = "127.0.0.1",
+        .port = port,
+        .recv_buf_size = recv_buf_size ? recv_buf_size : 256 * 1024,
+    };
+    OmBusTcpClient *client = NULL;
+    ck_assert_int_eq(om_bus_tcp_client_connect(&client, &cfg), 0);
+    ck_assert_ptr_nonnull(client);
+    return client;
+}
+
+/* ---- Test: server lifecycle ---- */
+START_TEST(test_tcp_create_destroy) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    ck_assert_uint_gt(om_bus_tcp_server_port(srv), 0);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 0);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: connect/disconnect ---- */
+START_TEST(test_tcp_connect_disconnect) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    /* Server must accept */
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 1);
+
+    /* Client closes */
+    om_bus_tcp_client_close(client);
+
+    /* Server detects disconnect */
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 0);
+
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: single record roundtrip ---- */
+START_TEST(test_tcp_single_record) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    /* Accept */
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    /* Broadcast one record */
+    uint8_t payload[16];
+    memset(payload, 0xAB, sizeof(payload));
+    ck_assert_int_eq(om_bus_tcp_server_broadcast(srv, 1, 3, payload, 16), 0);
+
+    /* Flush */
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    /* Small delay for TCP delivery */
+    usleep(1000);
+
+    /* Client polls */
+    OmBusRecord rec;
+    int rc = om_bus_tcp_client_poll(client, &rec);
+    ck_assert_int_eq(rc, 1);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+    ck_assert_uint_eq(rec.wal_type, 3);
+    ck_assert_uint_eq(rec.payload_len, 16);
+    ck_assert_int_eq(memcmp(rec.payload, payload, 16), 0);
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: batch broadcast (100 records) ---- */
+START_TEST(test_tcp_batch_broadcast) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    for (int i = 0; i < 100; i++) {
+        uint32_t val = (uint32_t)i;
+        ck_assert_int_eq(om_bus_tcp_server_broadcast(srv, (uint64_t)(i + 1), 1, &val, sizeof(val)), 0);
+    }
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    usleep(5000);
+
+    OmBusRecord rec;
+    for (int i = 0; i < 100; i++) {
+        int rc;
+        /* May need multiple polls if data arrives in chunks */
+        do {
+            rc = om_bus_tcp_client_poll(client, &rec);
+            if (rc == 0) usleep(1000);
+        } while (rc == 0);
+        ck_assert_int_eq(rc, 1);
+        ck_assert_uint_eq(rec.wal_seq, (uint64_t)(i + 1));
+        uint32_t val;
+        memcpy(&val, rec.payload, sizeof(val));
+        ck_assert_uint_eq(val, (uint32_t)i);
+    }
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: slow client (send buffer overflow -> disconnect) ---- */
+START_TEST(test_tcp_slow_client) {
+    /* Tiny send buffer: 64 bytes — a single 16+16=32 byte frame fits, but not many */
+    OmBusTcpServer *srv = tcp_test_server(4, 64);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 1);
+
+    /* Broadcast many records to overflow the tiny send buffer */
+    uint8_t payload[32];
+    memset(payload, 0, sizeof(payload));
+    for (int i = 0; i < 10; i++) {
+        om_bus_tcp_server_broadcast(srv, (uint64_t)(i + 1), 1, payload, sizeof(payload));
+    }
+
+    /* poll_io should disconnect the overflowed client */
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 0);
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: gap detection ---- */
+START_TEST(test_tcp_gap_detection) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    /* Broadcast wal_seq 1, then 5 (gap) */
+    uint32_t val = 0;
+    ck_assert_int_eq(om_bus_tcp_server_broadcast(srv, 1, 1, &val, sizeof(val)), 0);
+    ck_assert_int_eq(om_bus_tcp_server_broadcast(srv, 5, 1, &val, sizeof(val)), 0);
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    usleep(1000);
+
+    OmBusRecord rec;
+    /* First record: seq=1, no gap */
+    int rc = om_bus_tcp_client_poll(client, &rec);
+    ck_assert_int_eq(rc, 1);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+
+    /* Second record: seq=5, expected 2 -> gap */
+    rc = om_bus_tcp_client_poll(client, &rec);
+    ck_assert_int_eq(rc, OM_ERR_BUS_GAP_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 5);
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: multi-client ---- */
+START_TEST(test_tcp_multi_client) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    OmBusTcpClient *c1 = tcp_test_client(port, 0);
+    OmBusTcpClient *c2 = tcp_test_client(port, 0);
+    OmBusTcpClient *c3 = tcp_test_client(port, 0);
+
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 3);
+
+    /* Broadcast 5 records */
+    for (int i = 0; i < 5; i++) {
+        uint32_t val = (uint32_t)(i * 10);
+        ck_assert_int_eq(om_bus_tcp_server_broadcast(srv, (uint64_t)(i + 1), 1, &val, sizeof(val)), 0);
+    }
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    usleep(5000);
+
+    /* Each client reads all 5 */
+    OmBusTcpClient *clients[3] = {c1, c2, c3};
+    for (int c = 0; c < 3; c++) {
+        for (int i = 0; i < 5; i++) {
+            OmBusRecord rec;
+            int rc;
+            do {
+                rc = om_bus_tcp_client_poll(clients[c], &rec);
+                if (rc == 0) usleep(1000);
+            } while (rc == 0);
+            ck_assert_int_eq(rc, 1);
+            ck_assert_uint_eq(rec.wal_seq, (uint64_t)(i + 1));
+        }
+    }
+
+    om_bus_tcp_client_close(c1);
+    om_bus_tcp_client_close(c2);
+    om_bus_tcp_client_close(c3);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: server destroy while connected -> client poll returns DISCONNECTED ---- */
+START_TEST(test_tcp_server_destroy_connected) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 1);
+
+    /* Destroy server */
+    om_bus_tcp_server_destroy(srv);
+
+    usleep(1000);
+
+    /* Client should detect disconnect */
+    OmBusRecord rec;
+    int rc = om_bus_tcp_client_poll(client, &rec);
+    ck_assert_int_eq(rc, OM_ERR_BUS_TCP_DISCONNECTED);
+
+    om_bus_tcp_client_close(client);
+}
+END_TEST
+
+/* ---- Test: wal_seq tracking ---- */
+START_TEST(test_tcp_wal_seq_tracking) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+    ck_assert_uint_eq(om_bus_tcp_client_wal_seq(client), 0);
+
+    uint32_t val = 42;
+    ck_assert_int_eq(om_bus_tcp_server_broadcast(srv, 100, 1, &val, sizeof(val)), 0);
+    ck_assert_int_eq(om_bus_tcp_server_broadcast(srv, 200, 2, &val, sizeof(val)), 0);
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    usleep(1000);
+
+    OmBusRecord rec;
+    int rc = om_bus_tcp_client_poll(client, &rec);
+    ck_assert_int_eq(rc, 1);
+    ck_assert_uint_eq(om_bus_tcp_client_wal_seq(client), 100);
+
+    rc = om_bus_tcp_client_poll(client, &rec);
+    /* seq jumps 100->200, gap detected since expected=101 */
+    ck_assert(rc == 1 || rc == OM_ERR_BUS_GAP_DETECTED);
+    ck_assert_uint_eq(om_bus_tcp_client_wal_seq(client), 200);
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: protocol error (corrupted magic) ---- */
+START_TEST(test_tcp_protocol_error) {
+    /* Start a mini TCP listener, connect a real client, then send bad frame */
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    ck_assert_int_ge(lfd, 0);
+    int reuse = 1;
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    struct sockaddr_in laddr;
+    memset(&laddr, 0, sizeof(laddr));
+    laddr.sin_family = AF_INET;
+    laddr.sin_port = 0;
+    inet_pton(AF_INET, "127.0.0.1", &laddr.sin_addr);
+    ck_assert_int_eq(bind(lfd, (struct sockaddr *)&laddr, sizeof(laddr)), 0);
+    ck_assert_int_eq(listen(lfd, 1), 0);
+    socklen_t alen = sizeof(laddr);
+    getsockname(lfd, (struct sockaddr *)&laddr, &alen);
+    uint16_t bad_port = ntohs(laddr.sin_port);
+
+    /* Connect client to mini server */
+    OmBusTcpClientConfig bcfg = { .host = "127.0.0.1", .port = bad_port, .recv_buf_size = 4096 };
+    OmBusTcpClient *client = NULL;
+    ck_assert_int_eq(om_bus_tcp_client_connect(&client, &bcfg), 0);
+
+    /* Accept on server side */
+    int afd = accept(lfd, NULL, NULL);
+    ck_assert_int_ge(afd, 0);
+
+    /* Send frame with bad magic */
+    OmBusTcpFrameHeader bad = {
+        .magic = 0xDEADBEEF,
+        .wal_type = 1,
+        .flags = 0,
+        .payload_len = 4,
+        .wal_seq = 1,
+    };
+    uint32_t val = 42;
+    write(afd, &bad, sizeof(bad));
+    write(afd, &val, sizeof(val));
+
+    usleep(1000);
+
+    OmBusRecord rec;
+    int rc = om_bus_tcp_client_poll(client, &rec);
+    ck_assert_int_eq(rc, OM_ERR_BUS_TCP_PROTOCOL);
+
+    close(afd);
+    close(lfd);
+    om_bus_tcp_client_close(client);
+}
+END_TEST
+
+/* ============================================================================
  * Suite
  * ============================================================================ */
 
@@ -746,6 +1087,19 @@ Suite *bus_suite(void) {
     tcase_add_test(tc_wal, test_bus_wal_cancel);
     tcase_add_test(tc_wal, test_bus_worker_roundtrip);
     suite_add_tcase(s, tc_wal);
+
+    TCase *tc_tcp = tcase_create("TCP");
+    tcase_add_test(tc_tcp, test_tcp_create_destroy);
+    tcase_add_test(tc_tcp, test_tcp_connect_disconnect);
+    tcase_add_test(tc_tcp, test_tcp_single_record);
+    tcase_add_test(tc_tcp, test_tcp_batch_broadcast);
+    tcase_add_test(tc_tcp, test_tcp_slow_client);
+    tcase_add_test(tc_tcp, test_tcp_gap_detection);
+    tcase_add_test(tc_tcp, test_tcp_multi_client);
+    tcase_add_test(tc_tcp, test_tcp_server_destroy_connected);
+    tcase_add_test(tc_tcp, test_tcp_wal_seq_tracking);
+    tcase_add_test(tc_tcp, test_tcp_protocol_error);
+    suite_add_tcase(s, tc_tcp);
 
     return s;
 }

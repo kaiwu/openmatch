@@ -93,7 +93,7 @@ install(TARGETS openmatch_shared openmatch_static openmarket_shared openmarket_s
 )
 
 # ---------- ombus (message bus) ----------
-set(OMBUS_SOURCES om_bus_shm.c)
+set(OMBUS_SOURCES om_bus_shm.c om_bus_tcp.c)
 
 add_library(ombus_shared SHARED ${OMBUS_SOURCES})
 add_library(ombus_static STATIC ${OMBUS_SOURCES})
@@ -120,12 +120,12 @@ set_target_properties(ombus_shared PROPERTIES
     OUTPUT_NAME ombus
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
-    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/ombus/om_bus.h;${CMAKE_SOURCE_DIR}/include/ombus/om_bus_error.h"
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/ombus/om_bus.h;${CMAKE_SOURCE_DIR}/include/ombus/om_bus_error.h;${CMAKE_SOURCE_DIR}/include/ombus/om_bus_tcp.h"
 )
 
 set_target_properties(ombus_static PROPERTIES
     OUTPUT_NAME ombus
-    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/ombus/om_bus.h;${CMAKE_SOURCE_DIR}/include/ombus/om_bus_error.h"
+    PUBLIC_HEADER "${CMAKE_SOURCE_DIR}/include/ombus/om_bus.h;${CMAKE_SOURCE_DIR}/include/ombus/om_bus_error.h;${CMAKE_SOURCE_DIR}/include/ombus/om_bus_tcp.h"
 )
 
 install(TARGETS ombus_shared ombus_static
