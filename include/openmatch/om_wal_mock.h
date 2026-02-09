@@ -116,6 +116,11 @@ typedef struct OmWal {
     bool show_aux_data;         /* Show hex dump of aux data */
     size_t user_data_size;
     size_t aux_data_size;
+
+    /* Post-write callback - invoked after each WAL write with record data */
+    void (*post_write)(uint64_t seq, uint8_t type, const void *data,
+                       uint16_t len, void *ctx);
+    void *post_write_ctx;
 } OmWal;
 
 typedef struct OmWalReplay {
@@ -148,6 +153,15 @@ void om_wal_mock_close(OmWal *wal);
 static inline void om_wal_mock_set_slab(OmWal *wal, OmDualSlab *slab) {
     (void)wal;
     (void)slab;
+}
+
+/* Set post-write callback */
+static inline void om_wal_mock_set_post_write(OmWal *wal,
+    void (*fn)(uint64_t, uint8_t, const void*, uint16_t, void*), void *ctx) {
+    if (wal) {
+        wal->post_write = fn;
+        wal->post_write_ctx = ctx;
+    }
 }
 
 /* Log insert - prints INSERT operation to stderr */
@@ -207,6 +221,7 @@ int om_wal_mock_recover_from_wal(struct OmOrderbookContext *ctx,
 #define om_wal_init         om_wal_mock_init
 #define om_wal_close        om_wal_mock_close
 #define om_wal_set_slab     om_wal_mock_set_slab
+#define om_wal_set_post_write om_wal_mock_set_post_write
 #define om_wal_insert       om_wal_mock_insert
 #define om_wal_cancel       om_wal_mock_cancel
 #define om_wal_match        om_wal_mock_match

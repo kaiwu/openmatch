@@ -261,6 +261,14 @@ void om_wal_set_slab(OmWal *wal, struct OmDualSlab *slab) {
     }
 }
 
+void om_wal_set_post_write(OmWal *wal,
+    void (*fn)(uint64_t, uint8_t, const void*, uint16_t, void*), void *ctx) {
+    if (wal) {
+        wal->post_write = fn;
+        wal->post_write_ctx = ctx;
+    }
+}
+
 void om_wal_close(OmWal *wal) {
     if (!wal) return;
 
@@ -307,6 +315,11 @@ static uint64_t wal_append(OmWal *wal, OmWalType type, const void *data, size_t 
         uint32_t crc = crc32_compute(buf, WAL_HEADER_SIZE + data_size);
         memcpy((char *)wal->buffer + wal->buffer_used, &crc, WAL_CRC32_SIZE);
         wal->buffer_used += WAL_CRC32_SIZE;
+    }
+
+    if (wal->post_write) {
+        wal->post_write(seq, (uint8_t)type, data, (uint16_t)data_size,
+                        wal->post_write_ctx);
     }
 
     return seq;
@@ -374,6 +387,11 @@ uint64_t om_wal_insert(OmWal *wal, struct OmSlabSlot *slot, uint16_t product_id)
         uint32_t crc = crc32_compute(record_start, WAL_HEADER_SIZE + data_size);
         memcpy((char *)wal->buffer + wal->buffer_used, &crc, WAL_CRC32_SIZE);
         wal->buffer_used += WAL_CRC32_SIZE;
+    }
+
+    if (wal->post_write) {
+        wal->post_write(seq, OM_WAL_INSERT, record_start + WAL_HEADER_SIZE,
+                        (uint16_t)data_size, wal->post_write_ctx);
     }
 
     return seq;

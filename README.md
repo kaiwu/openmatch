@@ -1,20 +1,40 @@
 # OpenMatch
 
-Low-latency, single-threaded matching core in C11 with a cache-friendly slab
-allocator, orderbook, and durable WAL replay. Includes **OpenMarket**, a
-market data aggregation layer that consumes WAL records and builds public
-(total qty) and private (per-org dealable qty) price ladders. Built for
-HFT‑style workloads, but small and embeddable.
+Three C11 libraries for building low-latency trading systems. Small,
+embeddable, and designed for HFT-style workloads on a single thread per core.
 
-## Features
+## Three Artifacts
 
-- **Dual slab allocator** for fixed hot fields + separate aux (cold) data.
-- **Orderbook** with price ladder (Q1) and time FIFO (Q2) queues.
-- **Org queue (Q3)** per product for org-level batch cancel.
-- **Order ID hashmap** for O(1) cancel/lookup.
-- **Write‑ahead log (WAL)** with CRC32 option, replay, and sequence recovery.
-- **Matching engine** with callback hooks and WAL deal logging.
-- **Perf presets** for HFT, durability, recovery, and minimal memory.
+### OpenMatch — Matching Engine (`libopenmatch`)
+
+Callback-driven matching core with a cache-friendly dual slab allocator,
+intrusive-queue orderbook, and durable write-ahead log.
+
+- **Dual slab allocator** — hot fields (64 B slots) + separate aux (cold) data
+- **Orderbook** — price ladder (Q1), time FIFO (Q2), org queue (Q3) per product
+- **O(1) cancel** via order-ID hashmap (khash or khashl backend)
+- **WAL** — append-only log with CRC32, multi-file rotation, and full replay/recovery
+- **Engine callbacks** — `can_match`, `on_deal`, `on_booked`, `on_filled`, `on_cancel`, `pre_booked`
+- **Perf presets** — HFT (~2-6 M/sec), durable (~0.2-0.8 M/sec), and more
+
+### OpenMarket — Market Data Aggregation (`libopenmarket`)
+
+Consumes WAL records and builds publishable price ladders. Two worker types:
+
+- **Public workers** (product-sharded) — total remaining qty at each price level (~90 ns/record)
+- **Private workers** (org-sharded) — per-org dealable qty via `dealable()` callback, compute-on-publish with no per-org state (~15-25 ns/org fan-out)
+- Delta or full-snapshot publishing, top-N enforcement, dirty tracking
+
+### OmBus — SHM Message Bus (`libombus`)
+
+Shared-memory ring buffer for distributing WAL records across process
+boundaries without serialization or syscalls in the hot path.
+
+- **Producer** (`OmBusStream`) — creates SHM, publishes records inline (not pointers)
+- **Consumer** (`OmBusEndpoint`) — attaches to SHM, non-blocking poll with zero-copy option
+- **WAL hook** — `om_bus_attach_wal(wal, stream)` wires the engine's WAL post-write callback to the bus with one call (header-only, no link dependency from libopenmatch → libombus)
+- **Worker helpers** — `om_bus_poll_worker(ep, w)` / `om_bus_poll_public(ep, w)` feed bus records directly into market workers
+- Per-consumer tail tracking, CRC32 validation, gap detection, backpressure
 
 ## Project Layout
 
@@ -25,15 +45,22 @@ HFT‑style workloads, but small and embeddable.
 │   │   ├── om_slab.h         # Dual slab allocator + slot layout
 │   │   ├── orderbook.h       # Orderbook API
 │   │   ├── om_hash.h         # Hashmap (khash/khashl)
-│   │   ├── om_wal.h          # WAL API + replay
+│   │   ├── om_wal.h          # WAL API + replay + post_write hook
 │   │   ├── om_perf.h         # Performance presets
 │   │   ├── om_engine.h       # Matching engine API
 │   │   └── om_wal_mock.h     # WAL mock (prints to stderr)
-│   └── openmarket/           # Market data headers
-│       └── om_market.h       # Public/private ladder aggregation
+│   ├── openmarket/           # Market data headers
+│   │   ├── om_market.h       # Public/private ladder aggregation
+│   │   └── om_worker.h       # Lock-free ring for WAL distribution
+│   └── ombus/                # SHM message bus headers
+│       ├── om_bus.h           # Stream (producer) + Endpoint (consumer)
+│       ├── om_bus_error.h     # Bus error codes
+│       ├── om_bus_wal.h       # Header-only: WAL → bus glue
+│       └── om_bus_market.h    # Header-only: bus → market worker helpers
 ├── src/                      # Implementations
 │   ├── om_engine.c           # Matching engine
-│   └── om_market.c           # Market data aggregation
+│   ├── om_market.c           # Market data aggregation
+│   └── om_bus_shm.c          # SHM bus transport
 ├── tests/                    # check-based unit tests
 ├── tools/                    # Utility binaries + awk helpers
 │   ├── wal_reader.c
@@ -77,7 +104,9 @@ LD_PRELOAD=/usr/lib/libasan.so make test
 
 ## Core Concepts
 
-### Slab Allocator (`om_slab`)
+### OpenMatch
+
+#### Slab Allocator (`om_slab`)
 
 Each order lives in a fixed-size slab slot (`OmSlabSlot`):
 
@@ -93,7 +122,7 @@ Queues:
 - **Q2** time FIFO at price
 - **Q3** org queue
 
-### Orderbook (`orderbook`)
+#### Orderbook (`orderbook`)
 
 Per product:
 
@@ -110,7 +139,7 @@ API highlights:
 - `om_orderbook_cancel_org_product()` / `om_orderbook_cancel_org_all()`
 - `om_orderbook_get_best_bid()` / `om_orderbook_get_best_ask()`
 
-### WAL (`om_wal`)
+#### WAL (`om_wal`)
 
 Append-only log with replay support. Record types:
 
@@ -118,6 +147,10 @@ Append-only log with replay support. Record types:
 - `OM_WAL_CANCEL`
 - `OM_WAL_MATCH`
 - `OM_WAL_DEACTIVATE` / `OM_WAL_ACTIVATE`
+
+Post-write hook: a generic `post_write(seq, type, data, len, ctx)` callback
+fires after every WAL write, allowing downstream systems (e.g. OmBus) to
+observe records without any link dependency from libopenmatch.
 
 Replay API:
 
@@ -141,28 +174,28 @@ Multi-file WAL:
 - Set `wal_max_file_size` to roll to the next file on flush
 - Replay will scan sequential files in increasing index until a file is missing
 
-### Performance Presets (`om_perf`)
+#### Performance Presets (`om_perf`)
 
 Presets include `OM_PERF_DEFAULT`, `OM_PERF_HFT`, `OM_PERF_DURABLE`,
 `OM_PERF_RECOVERY`, `OM_PERF_MINIMAL`. Use `om_perf_validate()` and
 `om_perf_autotune()` to verify/tune.
 
-**Approximate throughput (single‑thread, light callbacks, in‑memory):**
+**Approximate throughput (single-thread, light callbacks, in-memory):**
 
-1. **OM_PERF_HFT**: ~2–6M matches/sec/core
-2. **OM_PERF_RECOVERY**: ~1.5–4M matches/sec/core
-3. **OM_PERF_DEFAULT**: ~1–3M matches/sec/core
-4. **OM_PERF_MINIMAL**: ~0.5–1.5M matches/sec/core
-5. **OM_PERF_DURABLE**: ~0.2–0.8M matches/sec/core
+1. **OM_PERF_HFT**: ~2-6M matches/sec/core
+2. **OM_PERF_RECOVERY**: ~1.5-4M matches/sec/core
+3. **OM_PERF_DEFAULT**: ~1-3M matches/sec/core
+4. **OM_PERF_MINIMAL**: ~0.5-1.5M matches/sec/core
+5. **OM_PERF_DURABLE**: ~0.2-0.8M matches/sec/core
 
 Engine can apply a preset via `OmEngineConfig.perf` or `om_engine_init_perf()`.
 
-### Engine (`om_engine`)
+#### Engine (`om_engine`)
 
 Callback-driven matching core. Supports:
 
 - `can_match` (per maker/taker; returns max match volume)
-- `on_match` (per order, post‑deduction)
+- `on_match` (per order, post-deduction)
 - `on_deal` (per trade)
 - `on_booked` / `on_filled` / `on_cancel`
 - `pre_booked` (decide whether remainder rests)
@@ -172,20 +205,20 @@ Order deactivation/activation:
 - `om_engine_deactivate(order_id)` (remove from book, keep slot)
 - `om_engine_activate(order_id)` (reattempt match as taker)
 
-### Market Data (OpenMarket)
+### OpenMarket
 
 Aggregates WAL records into publishable market data ladders. Two worker types:
 
 - **Public workers** (product-sharded): total remaining qty at each price level.
-  Simple hash-lookup aggregation, ~90ns per WAL record.
+  Simple hash-lookup aggregation, ~90 ns per WAL record.
 - **Private workers** (org-sharded): per-org dealable qty via a `dealable()` callback.
-  Compute-on-publish design — no per-org state stored, qty derived on demand from
-  global order state. Fan-out cost ~15-25ns/org depending on record type.
+  Compute-on-publish design -- no per-org state stored, qty derived on demand from
+  global order state. Fan-out cost ~15-25 ns/org depending on record type.
 
 Key data structures per private worker:
 
 - `product_slab` + `product_ladders[]`: sorted price levels (32-byte slots, Q1 queue)
-- `global_orders`: order_id → state (product, side, price, remaining, org, flags)
+- `global_orders`: order_id -> state (product, side, price, remaining, org, flags)
 - `product_order_sets[]`: per-product order_id sets for O(k) queries
 - Delta maps + dirty flags for incremental publish
 
@@ -193,6 +226,37 @@ Publishing modes: **delta** (only changed levels) or **full snapshot** (top-N wa
 
 See [docs/market_data.md](docs/market_data.md) for detailed aggregation flow,
 capacity planning, and per-record cost model.
+
+### OmBus
+
+SHM ring buffer for cross-process WAL record distribution. No serialization
+or syscalls in the hot path -- records are copied inline into shared memory.
+
+```
+Engine -> om_wal_insert() -> WAL buffer -> post_write() -> bus publish
+       -> om_wal_match()  -> WAL buffer -> post_write() -> bus publish
+                                                    |
+                                          OmBusEndpoint (consumer process)
+                                                    |
+                                          om_bus_poll_worker() -> OmMarketWorker
+```
+
+**Producer side** (`OmBusStream`):
+
+- `om_bus_stream_create()` creates a named SHM region with a fixed-slot ring
+- `om_bus_stream_publish()` copies payload into the next slot (spins on full ring)
+- `om_bus_attach_wal(wal, stream)` wires the WAL's `post_write` hook to publish
+  every WAL record to the bus automatically (header-only, no link dependency)
+
+**Consumer side** (`OmBusEndpoint`):
+
+- `om_bus_endpoint_open()` attaches to an existing SHM stream
+- `om_bus_endpoint_poll()` returns the next record (non-blocking, zero-copy option)
+- `om_bus_poll_worker(ep, w)` / `om_bus_poll_public(ep, w)` poll and feed directly
+  into market workers (header-only helpers)
+
+Features: per-consumer tail tracking, CRC32 validation, WAL sequence gap
+detection, configurable slot size and ring capacity.
 
 ## Example (Minimal)
 

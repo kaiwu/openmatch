@@ -132,6 +132,11 @@ typedef struct OmWal {
     uint32_t file_index;         /* Current WAL file index */
     OmWalConfig config;         /* Configuration copy with data sizes */
     struct OmDualSlab *slab;    /* Slab pointer for aux data access (can be NULL) */
+
+    /* Post-write callback - invoked after each WAL write with record data */
+    void (*post_write)(uint64_t seq, uint8_t type, const void *data,
+                       uint16_t len, void *ctx);
+    void *post_write_ctx;
 } OmWal;
 
 /* Initialize WAL with high-performance settings */
@@ -147,6 +152,15 @@ void om_wal_close(OmWal *wal);
  * @param slab Dual slab pointer (can be NULL to disable aux data logging)
  */
 void om_wal_set_slab(OmWal *wal, struct OmDualSlab *slab);
+
+/**
+ * Set post-write callback. Invoked after each WAL write with record data.
+ * @param wal WAL context
+ * @param fn  Callback: (seq, type, data, len, ctx)
+ * @param ctx User context passed to callback
+ */
+void om_wal_set_post_write(OmWal *wal,
+    void (*fn)(uint64_t, uint8_t, const void*, uint16_t, void*), void *ctx);
 
 /* Write operations - all return sequence number on success, 0 on failure */
 /* These are FAST PATH - just append to buffer, no syscalls, no locks */

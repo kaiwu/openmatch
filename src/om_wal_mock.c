@@ -78,6 +78,22 @@ uint64_t om_wal_mock_insert(OmWal *wal, struct OmSlabSlot *slot, uint16_t produc
                 wal->sequence, slot->order_id, slot->price, slot->volume,
                 slot->volume_remain, slot->org, slot->flags, product_id);
     }
+    if (wal->post_write) {
+        OmWalInsert rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.order_id = slot->order_id;
+        rec.price = slot->price;
+        rec.volume = slot->volume;
+        rec.vol_remain = slot->volume_remain;
+        rec.org = slot->org;
+        rec.flags = slot->flags;
+        rec.product_id = product_id;
+        rec.user_data_size = (uint32_t)wal->user_data_size;
+        rec.aux_data_size = (uint32_t)wal->aux_data_size;
+        rec.timestamp_ns = wal_mock_now_ns();
+        wal->post_write(wal->sequence, OM_WAL_INSERT, &rec,
+                        (uint16_t)sizeof(rec), wal->post_write_ctx);
+    }
     return wal->sequence;
 }
 
@@ -94,6 +110,16 @@ uint64_t om_wal_mock_cancel(OmWal *wal, uint32_t order_id, uint32_t slot_idx, ui
         fprintf(stderr, "ts[%s] seq[%" PRIu64 "] type[CANCEL] oid[%" PRIu32 "] s[%" PRIu32
                         "] pid[%" PRIu16 "]\n",
                 ts_buf, wal->sequence, order_id, slot_idx, product_id);
+    }
+    if (wal->post_write) {
+        OmWalCancel rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.order_id = order_id;
+        rec.timestamp_ns = wal_mock_now_ns();
+        rec.slot_idx = slot_idx;
+        rec.product_id = product_id;
+        wal->post_write(wal->sequence, OM_WAL_CANCEL, &rec,
+                        (uint16_t)sizeof(rec), wal->post_write_ctx);
     }
     return wal->sequence;
 }
@@ -112,6 +138,10 @@ uint64_t om_wal_mock_match(OmWal *wal, const OmWalMatch *rec) {
                 ts_buf, wal->sequence, rec->maker_id, rec->taker_id, rec->price,
                 rec->volume, rec->product_id);
     }
+    if (wal->post_write) {
+        wal->post_write(wal->sequence, OM_WAL_MATCH, rec,
+                        (uint16_t)sizeof(*rec), wal->post_write_ctx);
+    }
     return wal->sequence;
 }
 
@@ -129,6 +159,16 @@ uint64_t om_wal_mock_deactivate(OmWal *wal, uint32_t order_id, uint32_t slot_idx
                         "] pid[%" PRIu16 "]\n",
                 ts_buf, wal->sequence, order_id, slot_idx, product_id);
     }
+    if (wal->post_write) {
+        OmWalDeactivate rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.order_id = order_id;
+        rec.timestamp_ns = wal_mock_now_ns();
+        rec.slot_idx = slot_idx;
+        rec.product_id = product_id;
+        wal->post_write(wal->sequence, OM_WAL_DEACTIVATE, &rec,
+                        (uint16_t)sizeof(rec), wal->post_write_ctx);
+    }
     return wal->sequence;
 }
 
@@ -145,6 +185,16 @@ uint64_t om_wal_mock_activate(OmWal *wal, uint32_t order_id, uint32_t slot_idx, 
         fprintf(stderr, "ts[%s] seq[%" PRIu64 "] type[ACTIVATE] oid[%" PRIu32 "] s[%" PRIu32
                         "] pid[%" PRIu16 "]\n",
                 ts_buf, wal->sequence, order_id, slot_idx, product_id);
+    }
+    if (wal->post_write) {
+        OmWalActivate rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.order_id = order_id;
+        rec.timestamp_ns = wal_mock_now_ns();
+        rec.slot_idx = slot_idx;
+        rec.product_id = product_id;
+        wal->post_write(wal->sequence, OM_WAL_ACTIVATE, &rec,
+                        (uint16_t)sizeof(rec), wal->post_write_ctx);
     }
     return wal->sequence;
 }

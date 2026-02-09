@@ -7,6 +7,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "ombus/om_bus.h"
+#include "ombus/om_bus_wal.h"
+#include "ombus/om_bus_market.h"
+#include "openmatch/om_engine.h"
 
 /* Unique SHM names per test to avoid collisions */
 #define TEST_SHM_PREFIX "/om-bus-test-"
@@ -403,6 +406,322 @@ START_TEST(test_bus_wal_seq_tracking) {
 END_TEST
 
 /* ============================================================================
+ * Integration: WAL → Bus → Worker
+ * ============================================================================ */
+
+/* Helper: create a temporary WAL file path */
+static const char *test_wal_path(const char *suffix) {
+    static char buf[256];
+    snprintf(buf, sizeof(buf), "/tmp/om-bus-test-%s-%d.wal", suffix, getpid());
+    return buf;
+}
+
+/* Helper: init engine with WAL and return it */
+static void init_test_engine(OmEngine *engine, const char *wal_path) {
+    OmWalConfig wal_cfg = {
+        .filename = wal_path,
+        .buffer_size = 64 * 1024,
+        .sync_interval_ms = 0,
+        .use_direct_io = false,
+        .enable_crc32 = false,
+        .user_data_size = 0,
+        .aux_data_size = 0,
+    };
+    OmEngineConfig cfg = {
+        .slab = {
+            .user_data_size = 0,
+            .aux_data_size = 0,
+            .total_slots = 256,
+        },
+        .wal = &wal_cfg,
+        .max_products = 4,
+        .max_org = 16,
+        .hashmap_initial_cap = 0,
+        .perf = NULL,
+        .callbacks = {0},
+    };
+    ck_assert_int_eq(om_engine_init(engine, &cfg), 0);
+}
+
+/* ---- Test: engine INSERT → bus publish → poll returns correct OmWalInsert ---- */
+START_TEST(test_bus_wal_attach) {
+    const char *name = test_shm_name("walattach");
+    const char *wal_path = test_wal_path("attach");
+
+    /* Create bus stream */
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name,
+        .capacity = 64,
+        .slot_size = 256,
+        .max_consumers = 1,
+        .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    /* Create endpoint */
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = { .stream_name = name, .consumer_index = 0, .zero_copy = false };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Init engine with WAL */
+    OmEngine engine;
+    init_test_engine(&engine, wal_path);
+
+    /* Attach WAL to bus */
+    om_bus_attach_wal(om_engine_get_wal(&engine), stream);
+
+    /* Insert an order → triggers WAL INSERT → post_write → bus publish */
+    OmSlabSlot *order = om_slab_alloc(&engine.orderbook.slab);
+    ck_assert_ptr_nonnull(order);
+    om_slot_set_order_id(order, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(order, 10000);
+    om_slot_set_volume(order, 50);
+    om_slot_set_volume_remain(order, 50);
+    om_slot_set_flags(order, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(order, 1);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, order), 0);
+
+    /* Poll from bus */
+    OmBusRecord rec;
+    int rc = om_bus_endpoint_poll(ep, &rec);
+    ck_assert_int_eq(rc, 1);
+    ck_assert_uint_eq(rec.wal_type, OM_WAL_INSERT);
+    ck_assert_uint_ge(rec.payload_len, sizeof(OmWalInsert));
+
+    /* Verify INSERT payload */
+    const OmWalInsert *ins = (const OmWalInsert *)rec.payload;
+    ck_assert_uint_eq(ins->order_id, order->order_id);
+    ck_assert_uint_eq(ins->price, 10000);
+    ck_assert_uint_eq(ins->volume, 50);
+    ck_assert_uint_eq(ins->vol_remain, 50);
+    ck_assert_uint_eq(ins->org, 1);
+    ck_assert_uint_eq(ins->product_id, 0);
+
+    /* No more records */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 0);
+
+    om_bus_endpoint_close(ep);
+    om_engine_destroy(&engine);
+    om_bus_stream_destroy(stream);
+    unlink(wal_path);
+}
+END_TEST
+
+/* ---- Test: two crossing orders → MATCH + INSERT records arrive on bus ---- */
+START_TEST(test_bus_wal_match) {
+    const char *name = test_shm_name("walmatch");
+    const char *wal_path = test_wal_path("match");
+
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name,
+        .capacity = 64,
+        .slot_size = 256,
+        .max_consumers = 1,
+        .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = { .stream_name = name, .consumer_index = 0, .zero_copy = false };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    OmEngine engine;
+    init_test_engine(&engine, wal_path);
+    om_bus_attach_wal(om_engine_get_wal(&engine), stream);
+
+    /* Insert maker (bid at 100) */
+    OmSlabSlot *maker = om_slab_alloc(&engine.orderbook.slab);
+    ck_assert_ptr_nonnull(maker);
+    om_slot_set_order_id(maker, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(maker, 100);
+    om_slot_set_volume(maker, 10);
+    om_slot_set_volume_remain(maker, 10);
+    om_slot_set_flags(maker, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(maker, 1);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, maker), 0);
+
+    /* Insert taker (ask at 100) → crosses → match */
+    OmSlabSlot *taker = om_slab_alloc(&engine.orderbook.slab);
+    ck_assert_ptr_nonnull(taker);
+    om_slot_set_order_id(taker, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(taker, 100);
+    om_slot_set_volume(taker, 10);
+    om_slot_set_volume_remain(taker, 10);
+    om_slot_set_flags(taker, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    om_slot_set_org(taker, 2);
+    ck_assert_int_eq(om_engine_match(&engine, 0, taker), 0);
+
+    /* Expect: INSERT (maker) then MATCH, in bus order */
+    OmBusRecord rec;
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_type, OM_WAL_INSERT);
+
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_type, OM_WAL_MATCH);
+    const OmWalMatch *m = (const OmWalMatch *)rec.payload;
+    ck_assert_uint_eq(m->maker_id, maker->order_id);
+    ck_assert_uint_eq(m->taker_id, taker->order_id);
+    ck_assert_uint_eq(m->price, 100);
+    ck_assert_uint_eq(m->volume, 10);
+
+    om_bus_endpoint_close(ep);
+    om_engine_destroy(&engine);
+    om_bus_stream_destroy(stream);
+    unlink(wal_path);
+}
+END_TEST
+
+/* ---- Test: insert + cancel → INSERT + CANCEL records on bus ---- */
+START_TEST(test_bus_wal_cancel) {
+    const char *name = test_shm_name("walcancel");
+    const char *wal_path = test_wal_path("cancel");
+
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name,
+        .capacity = 64,
+        .slot_size = 256,
+        .max_consumers = 1,
+        .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = { .stream_name = name, .consumer_index = 0, .zero_copy = false };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    OmEngine engine;
+    init_test_engine(&engine, wal_path);
+    om_bus_attach_wal(om_engine_get_wal(&engine), stream);
+
+    /* Insert an order */
+    OmSlabSlot *order = om_slab_alloc(&engine.orderbook.slab);
+    ck_assert_ptr_nonnull(order);
+    om_slot_set_order_id(order, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(order, 200);
+    om_slot_set_volume(order, 25);
+    om_slot_set_volume_remain(order, 25);
+    om_slot_set_flags(order, OM_SIDE_ASK | OM_TYPE_LIMIT);
+    om_slot_set_org(order, 3);
+    uint32_t oid = order->order_id;
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 1, order), 0);
+
+    /* Cancel the order */
+    ck_assert(om_engine_cancel(&engine, oid));
+
+    /* Bus should have INSERT then CANCEL */
+    OmBusRecord rec;
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_type, OM_WAL_INSERT);
+
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_type, OM_WAL_CANCEL);
+    const OmWalCancel *c = (const OmWalCancel *)rec.payload;
+    ck_assert_uint_eq(c->order_id, oid);
+    ck_assert_uint_eq(c->product_id, 1);
+
+    om_bus_endpoint_close(ep);
+    om_engine_destroy(&engine);
+    om_bus_stream_destroy(stream);
+    unlink(wal_path);
+}
+END_TEST
+
+/* Helper dealable: everyone sees everyone's orders fully */
+static uint64_t test_bus_dealable(const OmWalInsert *rec, uint16_t viewer_org, void *ctx) {
+    (void)ctx;
+    if (rec->org == viewer_org) return 0;
+    return rec->vol_remain;
+}
+
+/* ---- Test: full roundtrip: engine → bus → om_bus_poll_worker → verify qty ---- */
+START_TEST(test_bus_worker_roundtrip) {
+    const char *name = test_shm_name("walworker");
+    const char *wal_path = test_wal_path("worker");
+
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name,
+        .capacity = 64,
+        .slot_size = 256,
+        .max_consumers = 1,
+        .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = { .stream_name = name, .consumer_index = 0, .zero_copy = false };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Init engine */
+    OmEngine engine;
+    init_test_engine(&engine, wal_path);
+    om_bus_attach_wal(om_engine_get_wal(&engine), stream);
+
+    /* Init market with org 1 and org 2 subscribing to product 0 */
+    OmMarket market;
+    uint32_t org_to_worker[UINT16_MAX + 1U];
+    for (uint32_t i = 0; i <= UINT16_MAX; i++) org_to_worker[i] = 0;
+    OmMarketSubscription subs[2] = {
+        {.org_id = 1, .product_id = 0},
+        {.org_id = 2, .product_id = 0},
+    };
+    OmMarketConfig mcfg = {
+        .max_products = 4,
+        .worker_count = 1,
+        .public_worker_count = 1,
+        .org_to_worker = org_to_worker,
+        .product_to_public_worker = org_to_worker,
+        .subs = subs,
+        .sub_count = 2,
+        .expected_orders_per_worker = 16,
+        .expected_subscribers_per_product = 2,
+        .expected_price_levels = 8,
+        .top_levels = 5,
+        .dealable = test_bus_dealable,
+        .dealable_ctx = NULL,
+    };
+    ck_assert_int_eq(om_market_init(&market, &mcfg), 0);
+    OmMarketWorker *worker = om_market_worker(&market, 0);
+    ck_assert_ptr_nonnull(worker);
+
+    /* Insert order (org=1, bid at 500, vol=100) via engine */
+    OmSlabSlot *order = om_slab_alloc(&engine.orderbook.slab);
+    ck_assert_ptr_nonnull(order);
+    om_slot_set_order_id(order, om_slab_next_order_id(&engine.orderbook.slab));
+    om_slot_set_price(order, 500);
+    om_slot_set_volume(order, 100);
+    om_slot_set_volume_remain(order, 100);
+    om_slot_set_flags(order, OM_SIDE_BID | OM_TYPE_LIMIT);
+    om_slot_set_org(order, 1);
+    ck_assert_int_eq(om_orderbook_insert(&engine.orderbook, 0, order), 0);
+
+    /* Poll bus → feed worker */
+    int rc = om_bus_poll_worker(ep, worker);
+    ck_assert_int_eq(rc, 1);
+
+    /* Verify: org 2 should see org 1's order at price 500 with qty 100 */
+    uint64_t qty = 0;
+    ck_assert_int_eq(om_market_worker_get_qty(worker, 2, 0, OM_SIDE_BID, 500, &qty), 0);
+    ck_assert_uint_eq(qty, 100);
+
+    /* org 1 should NOT see its own order (dealable returns 0 for self) */
+    ck_assert_int_ne(om_market_worker_get_qty(worker, 1, 0, OM_SIDE_BID, 500, &qty), 0);
+
+    /* No more records */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, (OmBusRecord[1]){{0}}), 0);
+
+    om_bus_endpoint_close(ep);
+    om_engine_destroy(&engine);
+    om_market_destroy(&market);
+    om_bus_stream_destroy(stream);
+    unlink(wal_path);
+}
+END_TEST
+
+/* ============================================================================
  * Suite
  * ============================================================================ */
 
@@ -420,5 +739,13 @@ Suite *bus_suite(void) {
     tcase_add_test(tc, test_bus_magic_mismatch);
     tcase_add_test(tc, test_bus_wal_seq_tracking);
     suite_add_tcase(s, tc);
+
+    TCase *tc_wal = tcase_create("WAL-Bus");
+    tcase_add_test(tc_wal, test_bus_wal_attach);
+    tcase_add_test(tc_wal, test_bus_wal_match);
+    tcase_add_test(tc_wal, test_bus_wal_cancel);
+    tcase_add_test(tc_wal, test_bus_worker_roundtrip);
+    suite_add_tcase(s, tc_wal);
+
     return s;
 }
