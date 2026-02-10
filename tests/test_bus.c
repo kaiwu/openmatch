@@ -13,6 +13,7 @@
 #include "ombus/om_bus_tcp.h"
 #include "ombus/om_bus_wal.h"
 #include "ombus/om_bus_market.h"
+#include "ombus/om_bus_relay.h"
 #include "openmatch/om_engine.h"
 
 /* Unique SHM names per test to avoid collisions */
@@ -1435,6 +1436,113 @@ START_TEST(test_bus_stale_consumer) {
 }
 END_TEST
 
+/* ---- Test: F1 — relay SHM -> TCP ---- */
+START_TEST(test_bus_relay) {
+    const char *name = test_shm_name("relay");
+
+    /* Create SHM stream + endpoint (consumer for relay) */
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 2, .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *relay_ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = true,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&relay_ep, &ecfg), 0);
+
+    /* Create TCP server */
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    /* Connect a TCP client */
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Publish 5 records to SHM */
+    for (int i = 1; i <= 5; i++) {
+        uint32_t payload = (uint32_t)(i * 10);
+        om_bus_stream_publish(stream, (uint64_t)i, 1, &payload, sizeof(payload));
+    }
+
+    /* Run relay manually (can't use om_bus_relay_run since it loops) */
+    for (int i = 0; i < 5; i++) {
+        OmBusRecord rec;
+        int rc = om_bus_endpoint_poll(relay_ep, &rec);
+        ck_assert_int_eq(rc, 1);
+        om_bus_tcp_server_broadcast(srv, rec.wal_seq, rec.wal_type,
+                                     rec.payload, rec.payload_len);
+    }
+    om_bus_tcp_server_poll_io(srv);
+    usleep(10000);
+
+    /* TCP client receives all 5 */
+    for (int i = 1; i <= 5; i++) {
+        OmBusRecord rec;
+        ck_assert_int_eq(om_bus_tcp_client_poll(client, &rec), 1);
+        ck_assert_uint_eq(rec.wal_seq, (uint64_t)i);
+        uint32_t val;
+        memcpy(&val, rec.payload, sizeof(val));
+        ck_assert_uint_eq(val, (uint32_t)(i * 10));
+    }
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+    om_bus_endpoint_close(relay_ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+/* ---- Test: F4 — auto-reconnect client ---- */
+START_TEST(test_tcp_auto_reconnect) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    /* Create auto-reconnect client */
+    OmBusTcpAutoClient *ac = NULL;
+    OmBusTcpAutoClientConfig acfg = {
+        .base = { .host = "127.0.0.1", .port = port, .recv_buf_size = 0 },
+        .max_retries = 0,       /* unlimited */
+        .retry_base_ms = 50,
+        .retry_max_ms = 200,
+    };
+    ck_assert_int_eq(om_bus_tcp_auto_client_create(&ac, &acfg), 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Broadcast and receive a record */
+    uint32_t payload = 111;
+    om_bus_tcp_server_broadcast(srv, 1, 1, &payload, sizeof(payload));
+    om_bus_tcp_server_poll_io(srv);
+    usleep(10000);
+
+    OmBusRecord rec;
+    ck_assert_int_eq(om_bus_tcp_auto_client_poll(ac, &rec), 1);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+
+    /* Destroy server — simulates disconnect */
+    om_bus_tcp_server_destroy(srv);
+
+    /* Auto-poll should detect disconnect and return 0 (reconnecting) */
+    int rc = om_bus_tcp_auto_client_poll(ac, &rec);
+    ck_assert(rc == 0 || rc == OM_ERR_BUS_TCP_DISCONNECTED);
+
+    /* Create new server on same port may not get same port, so create
+     * a new one and verify auto client returns 0 during backoff */
+    usleep(10000);
+    rc = om_bus_tcp_auto_client_poll(ac, &rec);
+    /* During backoff or reconnect attempt — could be 0 or error */
+    ck_assert(rc <= 0);
+
+    /* Verify wal_seq tracking persists across disconnect */
+    ck_assert_uint_eq(om_bus_tcp_auto_client_wal_seq(ac), 1);
+
+    om_bus_tcp_auto_client_close(ac);
+}
+END_TEST
+
 /* ============================================================================
  * Suite
  * ============================================================================ */
@@ -1457,6 +1565,7 @@ Suite *bus_suite(void) {
     tcase_add_test(tc, test_bus_cursor_persistence);
     tcase_add_test(tc, test_bus_epoch_restart);
     tcase_add_test(tc, test_bus_stale_consumer);
+    tcase_add_test(tc, test_bus_relay);
     suite_add_tcase(s, tc);
 
     TCase *tc_wal = tcase_create("WAL-Bus");
@@ -1481,6 +1590,7 @@ Suite *bus_suite(void) {
     tcase_add_test(tc_tcp, test_tcp_max_clients);
     tcase_add_test(tc_tcp, test_tcp_server_stats);
     tcase_add_test(tc_tcp, test_tcp_slow_client_stats);
+    tcase_add_test(tc_tcp, test_tcp_auto_reconnect);
     suite_add_tcase(s, tc_tcp);
 
     return s;

@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "ombus/om_bus_tcp.h"
@@ -533,5 +534,111 @@ void om_bus_tcp_client_close(OmBusTcpClient *client) {
     if (client->fd >= 0)
         close(client->fd);
     free(client->recv_buf);
+    free(client);
+}
+
+/* ============================================================================
+ * Auto-Reconnect Client
+ * ============================================================================ */
+
+static uint64_t _monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+struct OmBusTcpAutoClient {
+    OmBusTcpClient          *inner;
+    OmBusTcpAutoClientConfig cfg;
+    uint64_t                 last_wal_seq;
+    uint32_t                 retry_count;
+    uint32_t                 current_backoff_ms;
+    uint64_t                 next_retry_ms;    /* monotonic ms for next attempt */
+    bool                     disconnected;
+};
+
+int om_bus_tcp_auto_client_create(OmBusTcpAutoClient **out,
+                                    const OmBusTcpAutoClientConfig *cfg) {
+    if (!out || !cfg || !cfg->base.host) return OM_ERR_BUS_INIT;
+
+    OmBusTcpAutoClient *ac = calloc(1, sizeof(*ac));
+    if (!ac) return OM_ERR_BUS_INIT;
+
+    ac->cfg = *cfg;
+    if (ac->cfg.retry_base_ms == 0) ac->cfg.retry_base_ms = 100;
+    if (ac->cfg.retry_max_ms == 0) ac->cfg.retry_max_ms = 5000;
+
+    int rc = om_bus_tcp_client_connect(&ac->inner, &cfg->base);
+    if (rc < 0) {
+        free(ac);
+        return rc;
+    }
+
+    *out = ac;
+    return 0;
+}
+
+int om_bus_tcp_auto_client_poll(OmBusTcpAutoClient *client, OmBusRecord *rec) {
+    if (!client || !rec) return OM_ERR_BUS_INIT;
+
+    /* If disconnected, try to reconnect */
+    if (client->disconnected) {
+        uint64_t now = _monotonic_ms();
+        if (now < client->next_retry_ms) return 0; /* still in backoff */
+
+        /* Check max retries */
+        if (client->cfg.max_retries > 0 &&
+            client->retry_count >= client->cfg.max_retries) {
+            return OM_ERR_BUS_TCP_DISCONNECTED;
+        }
+
+        /* Attempt reconnect */
+        OmBusTcpClient *new_inner = NULL;
+        int rc = om_bus_tcp_client_connect(&new_inner, &client->cfg.base);
+        if (rc < 0) {
+            client->retry_count++;
+            /* Exponential backoff */
+            client->current_backoff_ms = client->current_backoff_ms * 2;
+            if (client->current_backoff_ms > client->cfg.retry_max_ms)
+                client->current_backoff_ms = client->cfg.retry_max_ms;
+            client->next_retry_ms = _monotonic_ms() + client->current_backoff_ms;
+            return 0; /* reconnecting */
+        }
+
+        /* Reconnected successfully */
+        client->inner = new_inner;
+        client->disconnected = false;
+        client->retry_count = 0;
+        client->current_backoff_ms = client->cfg.retry_base_ms;
+    }
+
+    /* Normal poll */
+    int rc = om_bus_tcp_client_poll(client->inner, rec);
+    if (rc == 1) {
+        client->last_wal_seq = rec->wal_seq;
+        return 1;
+    }
+    if (rc == OM_ERR_BUS_TCP_DISCONNECTED) {
+        om_bus_tcp_client_close(client->inner);
+        client->inner = NULL;
+        client->disconnected = true;
+        client->current_backoff_ms = client->cfg.retry_base_ms;
+        client->next_retry_ms = _monotonic_ms() + client->current_backoff_ms;
+        return 0; /* will retry on next poll */
+    }
+
+    return rc; /* 0 (no frame), gap, protocol error, etc. */
+}
+
+uint64_t om_bus_tcp_auto_client_wal_seq(const OmBusTcpAutoClient *client) {
+    if (!client) return 0;
+    if (client->inner)
+        return om_bus_tcp_client_wal_seq(client->inner);
+    return client->last_wal_seq;
+}
+
+void om_bus_tcp_auto_client_close(OmBusTcpAutoClient *client) {
+    if (!client) return;
+    om_bus_tcp_client_close(client->inner);
     free(client);
 }

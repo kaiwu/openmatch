@@ -31,8 +31,58 @@ static inline uint64_t _om_bus_monotonic_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-/* CRC32 (IEEE 802.3 polynomial: 0xEDB88320) */
-static uint32_t _om_bus_crc32_table[256];
+/* CRC32C (Castagnoli polynomial: 0x82F63B78)
+ * Hardware-accelerated on x86 (SSE4.2) and ARM (CRC extension).
+ * Falls back to software table otherwise. */
+
+#if defined(__x86_64__) && defined(__SSE4_2__)
+#include <nmmintrin.h>
+#define OM_BUS_CRC32C_HW 1
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+#include <arm_acle.h>
+#define OM_BUS_CRC32C_HW 2
+#endif
+
+#ifdef OM_BUS_CRC32C_HW
+
+static uint32_t _om_bus_crc32(const void *data, size_t len) {
+    const uint8_t *buf = (const uint8_t *)data;
+    uint32_t crc = 0xFFFFFFFF;
+
+#if OM_BUS_CRC32C_HW == 1
+    /* x86 SSE4.2 — process 8 bytes at a time */
+    while (len >= 8) {
+        uint64_t val;
+        memcpy(&val, buf, 8);
+        crc = (uint32_t)_mm_crc32_u64(crc, val);
+        buf += 8;
+        len -= 8;
+    }
+    while (len > 0) {
+        crc = _mm_crc32_u8(crc, *buf++);
+        len--;
+    }
+#elif OM_BUS_CRC32C_HW == 2
+    /* ARM CRC extension — process 8 bytes at a time */
+    while (len >= 8) {
+        uint64_t val;
+        memcpy(&val, buf, 8);
+        crc = __crc32cd(crc, val);
+        buf += 8;
+        len -= 8;
+    }
+    while (len > 0) {
+        crc = __crc32cb(crc, *buf++);
+        len--;
+    }
+#endif
+
+    return crc ^ 0xFFFFFFFF;
+}
+
+#else /* Software fallback */
+
+static uint32_t _om_bus_crc32c_table[256];
 static _Atomic bool _om_bus_crc32_ready = false;
 
 static void _om_bus_crc32_init(void) {
@@ -40,9 +90,9 @@ static void _om_bus_crc32_init(void) {
     for (uint32_t i = 0; i < 256; i++) {
         uint32_t c = i;
         for (int j = 0; j < 8; j++) {
-            c = (c >> 1) ^ ((c & 1) ? 0xEDB88320U : 0U);
+            c = (c >> 1) ^ ((c & 1) ? 0x82F63B78U : 0U);
         }
-        _om_bus_crc32_table[i] = c;
+        _om_bus_crc32c_table[i] = c;
     }
     atomic_store_explicit(&_om_bus_crc32_ready, true, memory_order_release);
 }
@@ -52,10 +102,12 @@ static uint32_t _om_bus_crc32(const void *data, size_t len) {
     const uint8_t *buf = (const uint8_t *)data;
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < len; i++) {
-        crc = _om_bus_crc32_table[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
+        crc = _om_bus_crc32c_table[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
     }
     return crc ^ 0xFFFFFFFF;
 }
+
+#endif /* OM_BUS_CRC32C_HW */
 
 /* Compute total SHM file size */
 static size_t _om_bus_shm_size(uint32_t capacity, uint32_t slot_size,
@@ -123,6 +175,8 @@ struct OmBusStream {
     char shm_name[64];         /* for shm_unlink on destroy */
     uint64_t records_published; /* stats counter */
     uint64_t staleness_ns;     /* consumer staleness threshold (0 = disabled) */
+    OmBusBackpressureCb backpressure_cb;
+    void *backpressure_ctx;
 };
 
 int om_bus_stream_create(OmBusStream **out, const OmBusStreamConfig *config) {
@@ -210,6 +264,8 @@ int om_bus_stream_create(OmBusStream **out, const OmBusStreamConfig *config) {
     s->max_consumers = max_consumers;
     s->flags = config->flags;
     s->staleness_ns = config->staleness_ns;
+    s->backpressure_cb = config->backpressure_cb;
+    s->backpressure_ctx = config->backpressure_ctx;
     strncpy(s->shm_name, config->stream_name, sizeof(s->shm_name) - 1);
     s->shm_name[sizeof(s->shm_name) - 1] = '\0';
 
@@ -226,7 +282,10 @@ int om_bus_stream_publish(OmBusStream *stream, uint64_t wal_seq,
 
     uint64_t head = atomic_load_explicit(&stream->hdr->head, memory_order_relaxed);
 
-    /* Backpressure: spin while ring is full */
+    /* Backpressure: phased spin while ring is full
+     * Phase 1: 10 iterations  — cpu_relax()      (~100ns)
+     * Phase 2: 32 iterations  — cpu_relax()      (~300ns)
+     * Phase 3: sched_yield()  + callback          (~50-100us) */
     uint32_t pressure_spins = 0;
     while (1) {
         uint64_t mt = atomic_load_explicit(&stream->hdr->min_tail, memory_order_acquire);
@@ -235,11 +294,18 @@ int om_bus_stream_publish(OmBusStream *stream, uint64_t wal_seq,
             mt = _om_bus_min_tail_live(stream->tails, stream->max_consumers,
                                         stream->staleness_ns);
             atomic_store_explicit(&stream->hdr->min_tail, mt, memory_order_release);
-        } else {
+        }
+        if (pressure_spins < 10) {
             _om_bus_cpu_relax();
+        } else if (pressure_spins < 42) {
+            _om_bus_cpu_relax();
+        } else {
+            if (pressure_spins == 42 && stream->backpressure_cb) {
+                stream->backpressure_cb(head, mt, stream->backpressure_ctx);
+            }
+            sched_yield();
         }
         pressure_spins++;
-        if ((pressure_spins & 1023U) == 0U) sched_yield();
     }
 
     uint64_t idx = head & stream->mask;
@@ -286,7 +352,7 @@ int om_bus_stream_publish_batch(OmBusStream *stream, const OmBusRecord *recs,
     uint64_t head = atomic_load_explicit(&stream->hdr->head, memory_order_relaxed);
 
     for (uint32_t i = 0; i < count; i++) {
-        /* Backpressure: spin while ring is full */
+        /* Backpressure: phased spin */
         uint32_t pressure_spins = 0;
         while (1) {
             uint64_t mt = atomic_load_explicit(&stream->hdr->min_tail,
@@ -297,11 +363,18 @@ int om_bus_stream_publish_batch(OmBusStream *stream, const OmBusRecord *recs,
                                             stream->staleness_ns);
                 atomic_store_explicit(&stream->hdr->min_tail, mt,
                                       memory_order_release);
-            } else {
+            }
+            if (pressure_spins < 10) {
                 _om_bus_cpu_relax();
+            } else if (pressure_spins < 42) {
+                _om_bus_cpu_relax();
+            } else {
+                if (pressure_spins == 42 && stream->backpressure_cb) {
+                    stream->backpressure_cb(head, mt, stream->backpressure_ctx);
+                }
+                sched_yield();
             }
             pressure_spins++;
-            if ((pressure_spins & 1023U) == 0U) sched_yield();
         }
 
         uint64_t idx = head & stream->mask;

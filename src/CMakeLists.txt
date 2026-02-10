@@ -104,6 +104,32 @@ if(NOT APPLE)
     target_link_libraries(ombus_static rt)
 endif()
 
+# Enable hardware CRC32C on x86_64 (SSE4.2) and ARM (CRC extension)
+# x86_64: add -msse4.2 to enable __SSE4_2__ macro + intrinsics
+# ARM: Apple Silicon defines __ARM_FEATURE_CRC32 by default (baseline ARMv8.1+),
+#      Linux aarch64 may need -march=armv8-a+crc. Use -mcrc to avoid overriding -march.
+include(CheckCCompilerFlag)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    check_c_compiler_flag("-msse4.2" HAS_SSE42)
+    if(HAS_SSE42)
+        set_source_files_properties(om_bus_shm.c PROPERTIES COMPILE_FLAGS "-msse4.2")
+    endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    # Apple Silicon: CRC is baseline (ARMv8.1+), no flag needed.
+    # Linux aarch64: may need -mcrc (GCC) or -march=armv8-a+crc.
+    if(NOT APPLE)
+        check_c_compiler_flag("-mcrc" HAS_MCRC)
+        if(HAS_MCRC)
+            set_source_files_properties(om_bus_shm.c PROPERTIES COMPILE_FLAGS "-mcrc")
+        else()
+            check_c_compiler_flag("-march=armv8-a+crc" HAS_ARM_CRC)
+            if(HAS_ARM_CRC)
+                set_source_files_properties(om_bus_shm.c PROPERTIES COMPILE_FLAGS "-march=armv8-a+crc")
+            endif()
+        endif()
+    endif()
+endif()
+
 target_include_directories(ombus_shared
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>

@@ -149,4 +149,43 @@ uint64_t om_bus_tcp_client_wal_seq(const OmBusTcpClient *client);
  */
 void om_bus_tcp_client_close(OmBusTcpClient *client);
 
+/* ============================================================================
+ * Auto-Reconnect Client API
+ * ============================================================================ */
+
+typedef struct OmBusTcpAutoClientConfig {
+    OmBusTcpClientConfig base;       /* host, port, recv_buf_size */
+    uint32_t max_retries;            /* 0 = unlimited */
+    uint32_t retry_base_ms;          /* initial backoff (default 100ms) */
+    uint32_t retry_max_ms;           /* max backoff (default 5000ms) */
+} OmBusTcpAutoClientConfig;
+
+typedef struct OmBusTcpAutoClient OmBusTcpAutoClient;
+
+/**
+ * Create an auto-reconnect TCP client. Performs initial connect.
+ * @param out Output handle
+ * @param cfg Configuration (base + reconnect params)
+ * @return 0 on success, negative on initial connect failure
+ */
+int om_bus_tcp_auto_client_create(OmBusTcpAutoClient **out,
+                                    const OmBusTcpAutoClientConfig *cfg);
+
+/**
+ * Poll for next frame with transparent reconnection.
+ * Returns 1 (record), 0 (no frame or reconnecting), negative on permanent failure.
+ * During reconnect backoff, returns 0.
+ */
+int om_bus_tcp_auto_client_poll(OmBusTcpAutoClient *client, OmBusRecord *rec);
+
+/**
+ * Get last consumed WAL sequence number.
+ */
+uint64_t om_bus_tcp_auto_client_wal_seq(const OmBusTcpAutoClient *client);
+
+/**
+ * Close auto-reconnect client and free resources.
+ */
+void om_bus_tcp_auto_client_close(OmBusTcpAutoClient *client);
+
 #endif /* OM_BUS_TCP_H */

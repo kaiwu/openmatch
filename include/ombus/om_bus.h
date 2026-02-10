@@ -91,6 +91,12 @@ typedef struct OmBusRecord {
  * Stream (Producer) API
  * ============================================================================ */
 
+/**
+ * Optional callback for sustained backpressure.
+ * Called when the producer has been spinning for >42 iterations (Phase 3).
+ */
+typedef void (*OmBusBackpressureCb)(uint64_t head, uint64_t min_tail, void *ctx);
+
 typedef struct OmBusStreamConfig {
     const char *stream_name;    /* SHM object name (e.g., "/om-bus-engine-0") */
     uint32_t    capacity;       /* Ring capacity, power of two (default 4096) */
@@ -98,6 +104,8 @@ typedef struct OmBusStreamConfig {
     uint32_t    max_consumers;  /* Maximum consumer count (default 8) */
     uint32_t    flags;          /* Feature flags (OM_BUS_FLAG_CRC, etc.) */
     uint64_t    staleness_ns;   /* Consumer staleness threshold (0 = disabled, default 5s) */
+    OmBusBackpressureCb backpressure_cb;  /* Optional backpressure callback */
+    void       *backpressure_ctx;         /* User context for callback */
 } OmBusStreamConfig;
 
 typedef struct OmBusStream OmBusStream;

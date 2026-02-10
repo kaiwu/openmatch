@@ -659,29 +659,11 @@ All tests use loopback (`127.0.0.1`) with ephemeral port (`port=0`).
 advancement. Per-slot seq fences are still written for consumer visibility, but
 head and min_tail refresh are amortized across the batch.
 
-#### P2: Backpressure Spin Optimization
+#### P2: Backpressure Spin Optimization ✅ Done
 
-Current spin loop: `cpu_relax()` for 1024 iterations then `sched_yield()`.
-This is ~10us busy-wait before yielding, which spikes p99 latency when ring
-is near full.
-
-Improvement: exponential backoff with configurable policy:
-
-```
-Phase 1:  10 iterations   → cpu_relax()         (~100ns)
-Phase 2:  32 iterations   → cpu_relax()         (~300ns)
-Phase 3:  sched_yield()                          (~50-100us)
-Phase 4:  futex_wait() on head (optional)        (wake on consumer advance)
-```
-
-Optional callback for sustained backpressure (>N spins):
-
-```c
-typedef void (*OmBusBackpressureCb)(uint64_t head, uint64_t min_tail, void *ctx);
-```
-
-This gives the engine visibility into stalled consumers rather than silently
-blocking.
+Phased backoff: Phase 1 (10 iters cpu_relax), Phase 2 (32 iters cpu_relax),
+Phase 3 (sched_yield). Optional `OmBusBackpressureCb` in `OmBusStreamConfig`
+fires once when entering Phase 3, giving the engine visibility into stalls.
 
 #### P3: TCP Client Recv Buffer — Deferred Compaction ✅ Done
 
@@ -703,47 +685,27 @@ at the end even without compacting).
 `_om_bus_crc32_init()` uses `_Atomic bool` with `memory_order_acquire` /
 `memory_order_release` for correct thread-safe initialization.
 
-#### P6: SIMD CRC32
+#### P6: SIMD CRC32C ✅ Done
 
-Replace software CRC32 table lookup with hardware-accelerated `_mm_crc32_u64`
-(x86 SSE4.2) or `__crc32cd` (ARM). ~10x faster for large payloads.
+Hardware-accelerated CRC32C (Castagnoli) on x86 (SSE4.2 `_mm_crc32_u64`) and
+ARM (`__crc32cd`). Software table fallback for other architectures. Polynomial
+changed from IEEE 0xEDB88320 to Castagnoli 0x82F63B78 to enable HW acceleration.
+CMake auto-detects `-msse4.2` / `-march=armv8-a+crc` per-file.
 
 ### 12.2 Functional Improvements
 
-#### F1: Reference Relay Process
+#### F1: Reference Relay Process ✅ Done
 
-No relay implementation exists — only the documented loop pattern (section
-5.3). Provide a library function and optional standalone tool:
+Header-only `om_bus_relay.h` provides `om_bus_relay_run()` — polls SHM endpoint,
+broadcasts to TCP server, adaptive sleep on idle (spin 100x then usleep).
+Shutdown via `volatile bool *running` flag. Returns 0 on clean shutdown,
+negative on SHM error.
 
-```c
-typedef struct OmBusRelayConfig {
-    OmBusEndpoint     *ep;           /* SHM consumer */
-    OmBusTcpServer    *srv;          /* TCP broadcaster */
-    volatile bool     *running;      /* shutdown flag */
-    uint32_t           poll_us;      /* sleep between empty polls (default 10) */
-} OmBusRelayConfig;
+#### F2: WAL Replay Helper for Gap Recovery ✅ Done
 
-int om_bus_relay_run(const OmBusRelayConfig *cfg);
-```
-
-Plus a `tools/om_bus_relay.c` CLI:
-
-```
-./om_bus_relay --shm /om-bus-engine-0 --consumer 7 --bind 0.0.0.0:9100
-```
-
-#### F2: WAL Replay Helper for Gap Recovery
-
-When a consumer detects `OM_ERR_BUS_GAP_DETECTED`, it needs to replay the
-WAL from its last known `wal_seq` to catch up. Provide a helper:
-
-```c
-int om_bus_replay_gap(const char *wal_path, uint64_t from_seq,
-                       uint64_t to_seq, OmMarketWorker *w);
-```
-
-This wraps `om_wal_replay_init()` → iterate → `om_market_worker_process()`
-for the missing range. Same pattern for public workers.
+Header-only `om_bus_replay.h` provides `om_bus_replay_gap()` and
+`om_bus_replay_gap_public()` — wraps WAL replay iterator to feed a
+`[from_seq, to_seq)` range into private or public market workers.
 
 #### F3: Consumer Cursor Persistence ✅ Done
 
@@ -751,26 +713,12 @@ for the missing range. Same pattern for public workers.
 sequence to a 16-byte file `[magic:4][wal_seq:8][crc32:4]` for resume after
 restart without full WAL replay.
 
-#### F4: TCP Client Auto-Reconnect
+#### F4: TCP Client Auto-Reconnect ✅ Done
 
-Currently the client returns `OM_ERR_BUS_TCP_DISCONNECTED` and the app must
-manually reconnect. Provide an optional auto-reconnect wrapper:
-
-```c
-typedef struct OmBusTcpAutoClientConfig {
-    OmBusTcpClientConfig base;
-    uint32_t max_retries;        /* 0 = unlimited */
-    uint32_t retry_base_ms;      /* initial backoff (default 100ms) */
-    uint32_t retry_max_ms;       /* max backoff (default 5000ms) */
-} OmBusTcpAutoClientConfig;
-
-int om_bus_tcp_auto_client_create(OmBusTcpAutoClient **out,
-                                   const OmBusTcpAutoClientConfig *cfg);
-int om_bus_tcp_auto_client_poll(OmBusTcpAutoClient *client, OmBusRecord *rec);
-```
-
-`auto_poll()` returns `0` during reconnect backoff, `1` on record, negative
-on permanent failure. Reconnect attempts happen inside `auto_poll()`.
+`OmBusTcpAutoClient` wraps `OmBusTcpClient` with transparent reconnection.
+Exponential backoff (configurable base/max ms, optional retry limit).
+`auto_poll()` returns 0 during backoff, 1 on record, negative on permanent
+failure. WAL sequence tracking persists across disconnects.
 
 #### F5: TCP Heartbeat / Keep-Alive ✅ Done
 
@@ -851,15 +799,15 @@ expected`. Default: off (backward compatible).
 
 **Phase 7 — Recovery & Tooling**:
 
-6. F1: Reference relay process + CLI tool — 2 hr
-7. F2: WAL replay gap helper — 1 hr
+6. ~~F1: Reference relay process~~ ✅
+7. ~~F2: WAL replay gap helper~~ ✅
 8. ~~F3: Consumer cursor persistence~~ ✅
 9. ~~R1: Producer restart detection (epoch)~~ ✅
 
 **Phase 8 — Performance & Polish**:
 
 10. ~~P1: Batch publish API~~ ✅
-11. P2: Backpressure exponential backoff — 1 hr
-12. P6: Hardware CRC32 — 1 hr
-13. F4: TCP auto-reconnect wrapper — 2 hr
+11. ~~P2: Backpressure exponential backoff~~ ✅
+12. ~~P6: Hardware CRC32C~~ ✅
+13. ~~F4: TCP auto-reconnect wrapper~~ ✅
 14. ~~R2: Stale consumer detection~~ ✅
