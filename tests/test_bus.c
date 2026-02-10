@@ -1062,6 +1062,277 @@ START_TEST(test_tcp_protocol_error) {
 }
 END_TEST
 
+/* ---- Test: TCP client reconnect + resume ---- */
+START_TEST(test_tcp_reconnect_resume) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Broadcast 5 records */
+    uint32_t payload = 0;
+    for (uint32_t i = 1; i <= 5; i++) {
+        payload = i * 100;
+        om_bus_tcp_server_broadcast(srv, i, 1, &payload, sizeof(payload));
+    }
+    om_bus_tcp_server_poll_io(srv);
+    usleep(10000);
+
+    OmBusRecord rec;
+    for (uint32_t i = 1; i <= 5; i++) {
+        ck_assert_int_eq(om_bus_tcp_client_poll(client, &rec), 1);
+        ck_assert_uint_eq(rec.wal_seq, i);
+    }
+
+    uint64_t last_seq = om_bus_tcp_client_wal_seq(client);
+    ck_assert_uint_eq(last_seq, 5);
+
+    /* Disconnect */
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Reconnect */
+    client = tcp_test_client(port, 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Broadcast more records */
+    for (uint32_t i = 6; i <= 10; i++) {
+        payload = i * 100;
+        om_bus_tcp_server_broadcast(srv, i, 1, &payload, sizeof(payload));
+    }
+    om_bus_tcp_server_poll_io(srv);
+    usleep(10000);
+
+    for (uint32_t i = 6; i <= 10; i++) {
+        ck_assert_int_eq(om_bus_tcp_client_poll(client, &rec), 1);
+        ck_assert_uint_eq(rec.wal_seq, i);
+    }
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: TCP max clients exhaustion ---- */
+START_TEST(test_tcp_max_clients) {
+    OmBusTcpServer *srv = tcp_test_server(3, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    OmBusTcpClient *c1 = tcp_test_client(port, 0);
+    OmBusTcpClient *c2 = tcp_test_client(port, 0);
+    OmBusTcpClient *c3 = tcp_test_client(port, 0);
+    om_bus_tcp_server_poll_io(srv);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 3);
+
+    /* 4th client connects at TCP level but server can't accept */
+    OmBusTcpClient *c4 = tcp_test_client(port, 0);
+    om_bus_tcp_server_poll_io(srv);
+    /* Still 3 — extra was closed by server */
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 3);
+
+    /* c4 should get disconnected on poll */
+    OmBusRecord rec;
+    int rc = om_bus_tcp_client_poll(c4, &rec);
+    ck_assert(rc == 0 || rc == OM_ERR_BUS_TCP_DISCONNECTED);
+
+    om_bus_tcp_client_close(c1);
+    om_bus_tcp_client_close(c2);
+    om_bus_tcp_client_close(c3);
+    om_bus_tcp_client_close(c4);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: large payload at SHM slot boundary ---- */
+START_TEST(test_bus_large_payload_boundary) {
+    const char *name = test_shm_name("boundary");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 16, .slot_size = 256,
+        .max_consumers = 1, .flags = OM_BUS_FLAG_CRC,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Max payload = slot_size - 24 (header) = 232 bytes */
+    uint8_t payload[232];
+    for (int i = 0; i < 232; i++) payload[i] = (uint8_t)(i & 0xFF);
+
+    ck_assert_int_eq(om_bus_stream_publish(stream, 1, 42, payload, 232), 0);
+
+    /* One byte too large should fail */
+    ck_assert_int_eq(om_bus_stream_publish(stream, 2, 42, payload, 233),
+                     OM_ERR_BUS_RECORD_TOO_LARGE);
+
+    OmBusRecord rec;
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.payload_len, 232);
+    ck_assert_int_eq(memcmp(rec.payload, payload, 232), 0);
+
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+/* ---- Test: batch publish API ---- */
+START_TEST(test_bus_batch_publish) {
+    const char *name = test_shm_name("batchpub");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 1, .flags = OM_BUS_FLAG_CRC,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Build batch of 20 records */
+    uint32_t payloads[20];
+    OmBusRecord recs[20];
+    for (int i = 0; i < 20; i++) {
+        payloads[i] = (uint32_t)(i * 111);
+        recs[i].wal_seq = (uint64_t)(i + 1);
+        recs[i].wal_type = 3;
+        recs[i].payload_len = sizeof(uint32_t);
+        recs[i].payload = &payloads[i];
+    }
+
+    ck_assert_int_eq(om_bus_stream_publish_batch(stream, recs, 20), 0);
+
+    /* Poll all 20 */
+    OmBusRecord out;
+    for (int i = 0; i < 20; i++) {
+        ck_assert_int_eq(om_bus_endpoint_poll(ep, &out), 1);
+        ck_assert_uint_eq(out.wal_seq, (uint64_t)(i + 1));
+        uint32_t val;
+        memcpy(&val, out.payload, sizeof(val));
+        ck_assert_uint_eq(val, (uint32_t)(i * 111));
+    }
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &out), 0);
+
+    /* Verify stats */
+    OmBusStreamStats stats;
+    om_bus_stream_stats(stream, &stats);
+    ck_assert_uint_eq(stats.records_published, 20);
+
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+/* ---- Test: cursor save/load ---- */
+START_TEST(test_bus_cursor_persistence) {
+    const char *name = test_shm_name("cursor");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 1, .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Publish and consume 5 records */
+    uint32_t payload = 42;
+    for (int i = 1; i <= 5; i++) {
+        om_bus_stream_publish(stream, (uint64_t)i, 1, &payload, sizeof(payload));
+    }
+    OmBusRecord rec;
+    for (int i = 0; i < 5; i++) {
+        ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    }
+
+    /* Save cursor */
+    const char *cursor_path = "/tmp/om_bus_test_cursor.bin";
+    ck_assert_int_eq(om_bus_endpoint_save_cursor(ep, cursor_path), 0);
+
+    /* Load cursor */
+    uint64_t loaded_seq = 0;
+    ck_assert_int_eq(om_bus_endpoint_load_cursor(cursor_path, &loaded_seq), 0);
+    ck_assert_uint_eq(loaded_seq, 5);
+
+    /* Corrupt file and verify failure */
+    int fd = open(cursor_path, O_WRONLY);
+    uint8_t garbage = 0xFF;
+    pwrite(fd, &garbage, 1, 0);  /* corrupt magic */
+    close(fd);
+    ck_assert_int_ne(om_bus_endpoint_load_cursor(cursor_path, &loaded_seq), 0);
+
+    unlink(cursor_path);
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+/* ---- Test: TCP server stats ---- */
+START_TEST(test_tcp_server_stats) {
+    OmBusTcpServer *srv = tcp_test_server(4, 256);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Broadcast 10 records */
+    uint32_t payload = 0xABCD;
+    for (int i = 1; i <= 10; i++) {
+        om_bus_tcp_server_broadcast(srv, (uint64_t)i, 1, &payload, sizeof(payload));
+    }
+    om_bus_tcp_server_poll_io(srv);
+
+    OmBusTcpServerStats stats;
+    om_bus_tcp_server_stats(srv, &stats);
+    ck_assert_uint_eq(stats.records_broadcast, 10);
+    ck_assert_uint_eq(stats.bytes_broadcast, 10 * sizeof(uint32_t));
+    ck_assert_uint_eq(stats.clients_accepted, 1);
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_poll_io(srv);
+
+    om_bus_tcp_server_stats(srv, &stats);
+    ck_assert_uint_eq(stats.clients_disconnected, 1);
+
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: TCP slow client stats (slow_client_drops) ---- */
+START_TEST(test_tcp_slow_client_stats) {
+    /* 64-byte send buffer — can only hold ~2-3 frames */
+    OmBusTcpServer *srv = tcp_test_server(4, 64);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Broadcast many records to overflow send buffer */
+    uint32_t payload = 42;
+    for (int i = 0; i < 100; i++) {
+        om_bus_tcp_server_broadcast(srv, (uint64_t)(i + 1), 1, &payload, sizeof(payload));
+    }
+
+    OmBusTcpServerStats stats;
+    om_bus_tcp_server_stats(srv, &stats);
+    ck_assert_uint_gt(stats.slow_client_drops, 0);
+
+    om_bus_tcp_server_poll_io(srv);
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
 /* ============================================================================
  * Suite
  * ============================================================================ */
@@ -1079,6 +1350,9 @@ Suite *bus_suite(void) {
     tcase_add_test(tc, test_bus_record_too_large);
     tcase_add_test(tc, test_bus_magic_mismatch);
     tcase_add_test(tc, test_bus_wal_seq_tracking);
+    tcase_add_test(tc, test_bus_large_payload_boundary);
+    tcase_add_test(tc, test_bus_batch_publish);
+    tcase_add_test(tc, test_bus_cursor_persistence);
     suite_add_tcase(s, tc);
 
     TCase *tc_wal = tcase_create("WAL-Bus");
@@ -1099,6 +1373,10 @@ Suite *bus_suite(void) {
     tcase_add_test(tc_tcp, test_tcp_server_destroy_connected);
     tcase_add_test(tc_tcp, test_tcp_wal_seq_tracking);
     tcase_add_test(tc_tcp, test_tcp_protocol_error);
+    tcase_add_test(tc_tcp, test_tcp_reconnect_resume);
+    tcase_add_test(tc_tcp, test_tcp_max_clients);
+    tcase_add_test(tc_tcp, test_tcp_server_stats);
+    tcase_add_test(tc_tcp, test_tcp_slow_client_stats);
     suite_add_tcase(s, tc_tcp);
 
     return s;

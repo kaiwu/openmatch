@@ -52,6 +52,12 @@ struct OmBusTcpServer {
     uint32_t             client_count;
     uint32_t             send_buf_size;
     uint16_t             port;         /* actual bound port */
+    /* Stats counters */
+    uint64_t             stats_records_broadcast;
+    uint64_t             stats_bytes_broadcast;
+    uint64_t             stats_clients_accepted;
+    uint64_t             stats_clients_disconnected;
+    uint64_t             stats_slow_client_drops;
 };
 
 struct OmBusTcpClient {
@@ -85,6 +91,24 @@ static int _set_nosigpipe(int fd) {
     return setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
 }
 #endif
+
+static void _set_keepalive(int fd) {
+    int val = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val));
+#ifdef __APPLE__
+    /* macOS uses TCP_KEEPALIVE for idle time (seconds) */
+    val = 30;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &val, sizeof(val));
+#else
+    /* Linux keep-alive parameters */
+    val = 30;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val));
+    val = 10;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val));
+    val = 3;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &val, sizeof(val));
+#endif
+}
 
 /* ============================================================================
  * Server
@@ -183,6 +207,7 @@ static void _server_close_client(OmBusTcpServer *srv, uint32_t idx) {
     slot->send_offset = 0;
     slot->disconnect_pending = false;
     srv->client_count--;
+    srv->stats_clients_disconnected++;
 }
 
 int om_bus_tcp_server_broadcast(OmBusTcpServer *srv, uint64_t wal_seq,
@@ -217,6 +242,7 @@ int om_bus_tcp_server_broadcast(OmBusTcpServer *srv, uint64_t wal_seq,
         /* Check again after compaction */
         if (slot->send_used + frame_size > slot->send_buf_size) {
             slot->disconnect_pending = true;
+            srv->stats_slow_client_drops++;
             continue;
         }
 
@@ -227,6 +253,8 @@ int om_bus_tcp_server_broadcast(OmBusTcpServer *srv, uint64_t wal_seq,
         slot->send_used += frame_size;
     }
 
+    srv->stats_records_broadcast++;
+    srv->stats_bytes_broadcast += len;
     return 0;
 }
 
@@ -283,6 +311,7 @@ int om_bus_tcp_server_poll_io(OmBusTcpServer *srv) {
 
             _set_nonblocking(cfd);
             _set_tcp_nodelay(cfd);
+            _set_keepalive(cfd);
 #ifdef __APPLE__
             _set_nosigpipe(cfd);
 #endif
@@ -295,6 +324,7 @@ int om_bus_tcp_server_poll_io(OmBusTcpServer *srv) {
             slot->send_offset = 0;
             slot->disconnect_pending = false;
             srv->client_count++;
+            srv->stats_clients_accepted++;
         }
     }
 
@@ -349,6 +379,15 @@ cleanup:
     return 0;
 }
 
+void om_bus_tcp_server_stats(const OmBusTcpServer *srv, OmBusTcpServerStats *out) {
+    if (!srv || !out) return;
+    out->records_broadcast = srv->stats_records_broadcast;
+    out->bytes_broadcast = srv->stats_bytes_broadcast;
+    out->clients_accepted = srv->stats_clients_accepted;
+    out->clients_disconnected = srv->stats_clients_disconnected;
+    out->slow_client_drops = srv->stats_slow_client_drops;
+}
+
 void om_bus_tcp_server_destroy(OmBusTcpServer *srv) {
     if (!srv) return;
 
@@ -396,6 +435,7 @@ int om_bus_tcp_client_connect(OmBusTcpClient **out, const OmBusTcpClientConfig *
     /* Set non-blocking after connect */
     _set_nonblocking(fd);
     _set_tcp_nodelay(fd);
+    _set_keepalive(fd);
 #ifdef __APPLE__
     _set_nosigpipe(fd);
 #endif
@@ -420,8 +460,12 @@ int om_bus_tcp_client_poll(OmBusTcpClient *client, OmBusRecord *rec) {
     if (!client || !rec) return OM_ERR_BUS_INIT;
     if (client->fd < 0) return OM_ERR_BUS_TCP_DISCONNECTED;
 
-    /* Compact buffer if needed: move unconsumed data to front */
-    if (client->recv_offset > 0) {
+    /* Compact buffer if needed: only when offset exceeds half the buffer
+     * or when there's no room to recv more data. This avoids memmove on
+     * every poll while still keeping space for new data. */
+    if (client->recv_offset > 0 &&
+        (client->recv_offset > client->recv_buf_size / 2 ||
+         client->recv_used == client->recv_buf_size)) {
         uint32_t pending = client->recv_used - client->recv_offset;
         if (pending > 0)
             memmove(client->recv_buf, client->recv_buf + client->recv_offset, pending);

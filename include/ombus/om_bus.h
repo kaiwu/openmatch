@@ -122,6 +122,31 @@ int om_bus_stream_publish(OmBusStream *stream, uint64_t wal_seq,
                           uint8_t wal_type, const void *payload, uint16_t len);
 
 /**
+ * Publish a batch of WAL records to the stream.
+ * Amortizes min_tail refresh and head advancement across the batch.
+ * @param stream    Stream handle
+ * @param recs      Array of records to publish
+ * @param count     Number of records
+ * @return 0 on success, OM_ERR_BUS_RECORD_TOO_LARGE if any record is too large
+ */
+int om_bus_stream_publish_batch(OmBusStream *stream, const OmBusRecord *recs,
+                                 uint32_t count);
+
+/**
+ * Stream statistics snapshot.
+ */
+typedef struct OmBusStreamStats {
+    uint64_t records_published;      /* total records published */
+    uint64_t head;                   /* current head position */
+    uint64_t min_tail;               /* current minimum consumer tail */
+} OmBusStreamStats;
+
+/**
+ * Snapshot current stream statistics.
+ */
+void om_bus_stream_stats(const OmBusStream *s, OmBusStreamStats *out);
+
+/**
  * Destroy stream and unlink SHM object.
  * @param stream Stream handle (NULL-safe)
  */
@@ -179,5 +204,28 @@ uint64_t om_bus_endpoint_wal_seq(const OmBusEndpoint *ep);
  * @param ep Endpoint handle (NULL-safe)
  */
 void om_bus_endpoint_close(OmBusEndpoint *ep);
+
+/* ============================================================================
+ * Consumer Cursor Persistence
+ * ============================================================================ */
+
+#define OM_BUS_CURSOR_MAGIC 0x4F4D4243U  /* "OMBC" */
+
+/**
+ * Save current endpoint cursor (WAL seq + tail) to a file.
+ * Format: [magic:4][wal_seq:8][crc32:4] = 16 bytes.
+ * @param ep   Endpoint handle
+ * @param path File path to write
+ * @return 0 on success, negative on error
+ */
+int om_bus_endpoint_save_cursor(const OmBusEndpoint *ep, const char *path);
+
+/**
+ * Load a previously saved cursor from file.
+ * @param path        File path to read
+ * @param wal_seq_out Output WAL sequence number
+ * @return 0 on success, negative on error
+ */
+int om_bus_endpoint_load_cursor(const char *path, uint64_t *wal_seq_out);
 
 #endif /* OM_BUS_H */

@@ -26,10 +26,10 @@ static inline bool _om_bus_is_power_of_two(uint32_t v) {
 
 /* CRC32 (IEEE 802.3 polynomial: 0xEDB88320) */
 static uint32_t _om_bus_crc32_table[256];
-static bool _om_bus_crc32_ready = false;
+static _Atomic bool _om_bus_crc32_ready = false;
 
 static void _om_bus_crc32_init(void) {
-    if (_om_bus_crc32_ready) return;
+    if (atomic_load_explicit(&_om_bus_crc32_ready, memory_order_acquire)) return;
     for (uint32_t i = 0; i < 256; i++) {
         uint32_t c = i;
         for (int j = 0; j < 8; j++) {
@@ -37,7 +37,7 @@ static void _om_bus_crc32_init(void) {
         }
         _om_bus_crc32_table[i] = c;
     }
-    _om_bus_crc32_ready = true;
+    atomic_store_explicit(&_om_bus_crc32_ready, true, memory_order_release);
 }
 
 static uint32_t _om_bus_crc32(const void *data, size_t len) {
@@ -96,6 +96,7 @@ struct OmBusStream {
     uint32_t max_consumers;
     uint32_t flags;
     char shm_name[64];         /* for shm_unlink on destroy */
+    uint64_t records_published; /* stats counter */
 };
 
 int om_bus_stream_create(OmBusStream **out, const OmBusStreamConfig *config) {
@@ -237,8 +238,74 @@ int om_bus_stream_publish(OmBusStream *stream, uint64_t wal_seq,
 
     /* Advance head */
     atomic_store_explicit(&stream->hdr->head, head + 1U, memory_order_release);
+    stream->records_published++;
 
     return 0;
+}
+
+int om_bus_stream_publish_batch(OmBusStream *stream, const OmBusRecord *recs,
+                                 uint32_t count) {
+    if (!stream || (!recs && count > 0)) return OM_ERR_BUS_INIT;
+
+    /* Validate all records fit before writing any */
+    uint32_t max_payload = stream->slot_size - OM_BUS_SLOT_HEADER_SIZE;
+    for (uint32_t i = 0; i < count; i++) {
+        if (recs[i].payload_len > max_payload) return OM_ERR_BUS_RECORD_TOO_LARGE;
+    }
+
+    uint64_t head = atomic_load_explicit(&stream->hdr->head, memory_order_relaxed);
+
+    for (uint32_t i = 0; i < count; i++) {
+        /* Backpressure: spin while ring is full */
+        uint32_t pressure_spins = 0;
+        while (1) {
+            uint64_t mt = atomic_load_explicit(&stream->hdr->min_tail,
+                                                memory_order_acquire);
+            if ((head - mt) < stream->capacity) break;
+            if ((pressure_spins & 31U) == 0U) {
+                mt = _om_bus_min_tail(stream->tails, stream->max_consumers);
+                atomic_store_explicit(&stream->hdr->min_tail, mt,
+                                      memory_order_release);
+            } else {
+                _om_bus_cpu_relax();
+            }
+            pressure_spins++;
+            if ((pressure_spins & 1023U) == 0U) sched_yield();
+        }
+
+        uint64_t idx = head & stream->mask;
+        OmBusSlotHeader *slot = (OmBusSlotHeader *)_om_bus_slot(
+            stream->map, stream->max_consumers, stream->slot_size, idx);
+
+        char *payload_dst = (char *)slot + OM_BUS_SLOT_HEADER_SIZE;
+        if (recs[i].payload && recs[i].payload_len > 0) {
+            memcpy(payload_dst, recs[i].payload, recs[i].payload_len);
+        }
+
+        slot->wal_seq = recs[i].wal_seq;
+        slot->wal_type = recs[i].wal_type;
+        slot->reserved = 0;
+        slot->payload_len = recs[i].payload_len;
+        slot->crc32 = (stream->flags & OM_BUS_FLAG_CRC)
+            ? _om_bus_crc32(recs[i].payload, recs[i].payload_len) : 0;
+
+        /* Per-slot seq fence for consumers */
+        atomic_store_explicit(&slot->seq, head + 1U, memory_order_release);
+        head++;
+    }
+
+    /* Single head advancement for the batch */
+    atomic_store_explicit(&stream->hdr->head, head, memory_order_release);
+    stream->records_published += count;
+
+    return 0;
+}
+
+void om_bus_stream_stats(const OmBusStream *s, OmBusStreamStats *out) {
+    if (!s || !out) return;
+    out->records_published = s->records_published;
+    out->head = atomic_load_explicit(&s->hdr->head, memory_order_relaxed);
+    out->min_tail = atomic_load_explicit(&s->hdr->min_tail, memory_order_relaxed);
 }
 
 void om_bus_stream_destroy(OmBusStream *stream) {
@@ -491,4 +558,56 @@ void om_bus_endpoint_close(OmBusEndpoint *ep) {
         munmap(ep->map, ep->map_size);
     }
     free(ep);
+}
+
+/* ============================================================================
+ * Consumer Cursor Persistence
+ * ============================================================================ */
+
+int om_bus_endpoint_save_cursor(const OmBusEndpoint *ep, const char *path) {
+    if (!ep || !path) return OM_ERR_BUS_INIT;
+
+    uint64_t wal_seq = atomic_load_explicit(&ep->tails[ep->consumer_index].wal_seq,
+                                             memory_order_relaxed);
+
+    uint8_t buf[16];
+    uint32_t magic = OM_BUS_CURSOR_MAGIC;
+    memcpy(buf, &magic, 4);
+    memcpy(buf + 4, &wal_seq, 8);
+    uint32_t crc = _om_bus_crc32(&wal_seq, sizeof(wal_seq));
+    memcpy(buf + 12, &crc, 4);
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return OM_ERR_BUS_SHM_OPEN;
+
+    ssize_t n = write(fd, buf, 16);
+    close(fd);
+    return (n == 16) ? 0 : OM_ERR_BUS_SHM_OPEN;
+}
+
+int om_bus_endpoint_load_cursor(const char *path, uint64_t *wal_seq_out) {
+    if (!path || !wal_seq_out) return OM_ERR_BUS_INIT;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return OM_ERR_BUS_SHM_OPEN;
+
+    uint8_t buf[16];
+    ssize_t n = read(fd, buf, 16);
+    close(fd);
+    if (n != 16) return OM_ERR_BUS_SHM_OPEN;
+
+    uint32_t magic;
+    memcpy(&magic, buf, 4);
+    if (magic != OM_BUS_CURSOR_MAGIC) return OM_ERR_BUS_CRC_MISMATCH;
+
+    uint64_t wal_seq;
+    memcpy(&wal_seq, buf + 4, 8);
+
+    uint32_t stored_crc;
+    memcpy(&stored_crc, buf + 12, 4);
+    uint32_t computed_crc = _om_bus_crc32(&wal_seq, sizeof(wal_seq));
+    if (stored_crc != computed_crc) return OM_ERR_BUS_CRC_MISMATCH;
+
+    *wal_seq_out = wal_seq;
+    return 0;
 }

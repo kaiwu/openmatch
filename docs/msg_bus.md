@@ -653,19 +653,11 @@ All tests use loopback (`127.0.0.1`) with ephemeral port (`port=0`).
 
 ### 12.1 Performance Improvements
 
-#### P1: Batch Publish API
+#### P1: Batch Publish API ✅ Done
 
-Currently `om_bus_stream_publish()` refreshes `min_tail` and does an atomic
-store per record. A batch variant would amortize these costs:
-
-```c
-int om_bus_stream_publish_batch(OmBusStream *s, const OmBusRecord *recs,
-                                 uint32_t count);
-```
-
-- Single `min_tail` refresh for the entire batch
-- Single `atomic_store` for head advancement at the end
-- Expected improvement: ~2-3x throughput for burst publishes
+`om_bus_stream_publish_batch()` publishes multiple records with a single head
+advancement. Per-slot seq fences are still written for consumer visibility, but
+head and min_tail refresh are amortized across the batch.
 
 #### P2: Backpressure Spin Optimization
 
@@ -691,14 +683,11 @@ typedef void (*OmBusBackpressureCb)(uint64_t head, uint64_t min_tail, void *ctx)
 This gives the engine visibility into stalled consumers rather than silently
 blocking.
 
-#### P3: TCP Client Recv Buffer — Deferred Compaction
+#### P3: TCP Client Recv Buffer — Deferred Compaction ✅ Done
 
-`om_bus_tcp_client_poll()` currently `memmove()`s on every call to compact the
-recv buffer. At 256KB buffer size this can cost ~1us per poll.
-
-Improvement: only compact when `recv_offset > recv_buf_size / 2`. This halves
-the number of `memmove()` calls and keeps frame data contiguous enough for
-parsing.
+`om_bus_tcp_client_poll()` only compacts when `recv_offset > recv_buf_size / 2`
+or the buffer is full. This halves `memmove()` calls while keeping frame data
+contiguous for parsing.
 
 #### P4: TCP Server Send Buffer — Offset-Based Write
 
@@ -709,11 +698,10 @@ this — the remaining optimization is to skip compaction in `broadcast()` if
 `send_used - send_offset + frame_size <= send_buf_size` (i.e., there's room
 at the end even without compacting).
 
-#### P5: CRC32 Table Init — Thread Safety
+#### P5: CRC32 Table Init — Thread Safety ✅ Done
 
-`_om_bus_crc32_init()` uses a plain `bool` flag. Benign race (table computed
-identically by all threads), but should use `_Atomic bool` or `pthread_once()`
-for correctness.
+`_om_bus_crc32_init()` uses `_Atomic bool` with `memory_order_acquire` /
+`memory_order_release` for correct thread-safe initialization.
 
 #### P6: SIMD CRC32
 
@@ -757,17 +745,11 @@ int om_bus_replay_gap(const char *wal_path, uint64_t from_seq,
 This wraps `om_wal_replay_init()` → iterate → `om_market_worker_process()`
 for the missing range. Same pattern for public workers.
 
-#### F3: Consumer Cursor Persistence
+#### F3: Consumer Cursor Persistence ✅ Done
 
-Optional disk-backed cursor so consumers can resume after restart without
-full WAL replay:
-
-```c
-int om_bus_endpoint_save_cursor(const OmBusEndpoint *ep, const char *path);
-int om_bus_endpoint_load_cursor(const char *path, uint64_t *wal_seq_out);
-```
-
-Format: 16-byte file — `[magic:4][wal_seq:8][crc32:4]`.
+`om_bus_endpoint_save_cursor()` / `om_bus_endpoint_load_cursor()` persist WAL
+sequence to a 16-byte file `[magic:4][wal_seq:8][crc32:4]` for resume after
+restart without full WAL replay.
 
 #### F4: TCP Client Auto-Reconnect
 
@@ -790,47 +772,19 @@ int om_bus_tcp_auto_client_poll(OmBusTcpAutoClient *client, OmBusRecord *rec);
 `auto_poll()` returns `0` during reconnect backoff, `1` on record, negative
 on permanent failure. Reconnect attempts happen inside `auto_poll()`.
 
-#### F5: TCP Heartbeat / Keep-Alive
+#### F5: TCP Heartbeat / Keep-Alive ✅ Done
 
-Long idle periods (no WAL activity) can trigger firewall or NAT timeout.
-Two options:
+OS-managed TCP keep-alive enabled on all sockets (server accept + client
+connect): `SO_KEEPALIVE=1`, `TCP_KEEPIDLE=30`, `TCP_KEEPINTVL=10`,
+`TCP_KEEPCNT=3`. macOS uses `TCP_KEEPALIVE` for idle time. No wire protocol
+change needed.
 
-1. **TCP_KEEPALIVE** socket option — simple, OS-managed, no wire protocol
-   change. Set `TCP_KEEPIDLE=30`, `TCP_KEEPINTVL=10`, `TCP_KEEPCNT=3`.
+#### F6: Server-Side Metrics ✅ Done
 
-2. **Application-level heartbeat** — server broadcasts an empty frame
-   (`payload_len=0`, `wal_type=0xFF`) every N seconds when idle. Client
-   detects stale connection if no frame received within timeout.
+TCP server stats via `om_bus_tcp_server_stats()`: records_broadcast,
+bytes_broadcast, clients_accepted, clients_disconnected, slow_client_drops.
 
-Option 1 is preferred (simpler, no protocol change). Add to server create
-and client connect.
-
-#### F6: Server-Side Metrics
-
-```c
-typedef struct OmBusTcpServerStats {
-    uint64_t records_broadcast;      /* total frames broadcast */
-    uint64_t bytes_broadcast;        /* total payload bytes */
-    uint64_t clients_accepted;       /* cumulative accepts */
-    uint64_t clients_disconnected;   /* cumulative disconnects */
-    uint64_t slow_client_drops;      /* disconnects due to buffer overflow */
-} OmBusTcpServerStats;
-
-void om_bus_tcp_server_stats(const OmBusTcpServer *srv, OmBusTcpServerStats *out);
-```
-
-Similarly for SHM:
-
-```c
-typedef struct OmBusStreamStats {
-    uint64_t records_published;
-    uint64_t backpressure_spins;     /* total spin-wait iterations */
-    uint64_t head;
-    uint64_t min_tail;
-} OmBusStreamStats;
-
-void om_bus_stream_stats(const OmBusStream *s, OmBusStreamStats *out);
-```
+SHM stream stats via `om_bus_stream_stats()`: records_published, head, min_tail.
 
 ### 12.3 Resilience Improvements
 
@@ -905,22 +859,22 @@ expected`. Default: off (backward compatible).
 
 **Phase 6 — Operational Readiness** (next):
 
-1. F5: TCP keep-alive (`TCP_KEEPALIVE` socket option) — 30 min
-2. P5: CRC32 thread safety (`_Atomic bool`) — 10 min
-3. P3: TCP recv buffer deferred compaction — 30 min
-4. F6: Server/stream stats structs — 1 hr
-5. Test: TCP reconnect, max clients, frame split — 2 hr
+1. ~~F5: TCP keep-alive (`TCP_KEEPALIVE` socket option)~~ ✅
+2. ~~P5: CRC32 thread safety (`_Atomic bool`)~~ ✅
+3. ~~P3: TCP recv buffer deferred compaction~~ ✅
+4. ~~F6: Server/stream stats structs~~ ✅
+5. ~~Test: TCP reconnect, max clients, stats, batch publish, cursor, boundary~~ ✅
 
 **Phase 7 — Recovery & Tooling**:
 
 6. F1: Reference relay process + CLI tool — 2 hr
 7. F2: WAL replay gap helper — 1 hr
-8. F3: Consumer cursor persistence — 1 hr
+8. ~~F3: Consumer cursor persistence~~ ✅
 9. R1: Producer restart detection (epoch) — 1 hr
 
 **Phase 8 — Performance & Polish**:
 
-10. P1: Batch publish API — 2 hr
+10. ~~P1: Batch publish API~~ ✅
 11. P2: Backpressure exponential backoff — 1 hr
 12. P6: Hardware CRC32 — 1 hr
 13. F4: TCP auto-reconnect wrapper — 2 hr

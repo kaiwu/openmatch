@@ -87,6 +87,22 @@ uint32_t om_bus_tcp_server_client_count(const OmBusTcpServer *srv);
 uint16_t om_bus_tcp_server_port(const OmBusTcpServer *srv);
 
 /**
+ * Server-side statistics snapshot.
+ */
+typedef struct OmBusTcpServerStats {
+    uint64_t records_broadcast;      /* total frames broadcast */
+    uint64_t bytes_broadcast;        /* total payload bytes */
+    uint64_t clients_accepted;       /* cumulative accepts */
+    uint64_t clients_disconnected;   /* cumulative disconnects */
+    uint64_t slow_client_drops;      /* disconnects due to buffer overflow */
+} OmBusTcpServerStats;
+
+/**
+ * Snapshot current server statistics.
+ */
+void om_bus_tcp_server_stats(const OmBusTcpServer *srv, OmBusTcpServerStats *out);
+
+/**
  * Destroy server, close all client connections and listen socket.
  * @param srv Server handle (NULL-safe)
  */
