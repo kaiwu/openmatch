@@ -30,6 +30,8 @@ typedef enum OmBusError {
     OM_ERR_BUS_TCP_PROTOCOL     = -817, /**< TCP frame magic mismatch */
     OM_ERR_BUS_TCP_IO           = -818, /**< TCP poll() error */
     OM_ERR_BUS_TCP_MAX_CLIENTS  = -819, /**< TCP max clients reached */
+    OM_ERR_BUS_EPOCH_CHANGED    = -820, /**< Producer epoch changed (restart) */
+    OM_ERR_BUS_CONSUMER_STALE   = -821, /**< Consumer heartbeat stale */
 } OmBusError;
 
 /**
@@ -61,6 +63,8 @@ static inline const char *om_bus_error_string(int err) {
         case OM_ERR_BUS_TCP_PROTOCOL:    return "TCP frame magic mismatch";
         case OM_ERR_BUS_TCP_IO:          return "TCP poll() error";
         case OM_ERR_BUS_TCP_MAX_CLIENTS: return "TCP max clients reached";
+        case OM_ERR_BUS_EPOCH_CHANGED:   return "Producer epoch changed";
+        case OM_ERR_BUS_CONSUMER_STALE:  return "Consumer heartbeat stale";
         default:                         return "Unknown bus error";
     }
 }

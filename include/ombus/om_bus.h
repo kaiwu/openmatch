@@ -60,8 +60,9 @@ typedef struct OmBusShmHeader {
     uint32_t flags;             /* Feature flags (OM_BUS_FLAG_CRC, etc.) */
     _Atomic uint64_t head;      /* Producer head position */
     _Atomic uint64_t min_tail;  /* Cached minimum consumer tail */
+    _Atomic uint64_t producer_epoch; /* Incremented on each stream_create */
     char stream_name[64];       /* Null-terminated stream name */
-    uint8_t _pad[OM_BUS_HEADER_PAGE - 104];
+    uint8_t _pad[OM_BUS_HEADER_PAGE - 112];
 } OmBusShmHeader;
 
 /* ============================================================================
@@ -71,7 +72,8 @@ typedef struct OmBusShmHeader {
 typedef struct OmBusConsumerTail {
     _Atomic uint64_t tail;      /* Consumer read position */
     _Atomic uint64_t wal_seq;   /* Last WAL sequence consumed */
-    uint8_t _pad[48];           /* Pad to 64 bytes (cache line) */
+    _Atomic uint64_t last_poll_ns; /* clock_gettime(MONOTONIC) at last poll */
+    uint8_t _pad[40];           /* Pad to 64 bytes (cache line) */
 } OmBusConsumerTail;
 
 /* ============================================================================
@@ -95,6 +97,7 @@ typedef struct OmBusStreamConfig {
     uint32_t    slot_size;      /* Bytes per slot (default 256) */
     uint32_t    max_consumers;  /* Maximum consumer count (default 8) */
     uint32_t    flags;          /* Feature flags (OM_BUS_FLAG_CRC, etc.) */
+    uint64_t    staleness_ns;   /* Consumer staleness threshold (0 = disabled, default 5s) */
 } OmBusStreamConfig;
 
 typedef struct OmBusStream OmBusStream;

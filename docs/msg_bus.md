@@ -788,36 +788,20 @@ SHM stream stats via `om_bus_stream_stats()`: records_published, head, min_tail.
 
 ### 12.3 Resilience Improvements
 
-#### R1: Producer Restart Detection
+#### R1: Producer Restart Detection ✅ Done
 
-When a new `OmBusStream` is created over an existing SHM name, the old SHM
-is unlinked and recreated. But if the producer crashes without cleanup,
-consumers may still be attached to stale SHM.
+`producer_epoch` (monotonic ns timestamp) added to `OmBusShmHeader`. Set on
+`stream_create`, stored by consumer on `endpoint_open`. Consumers check epoch
+on every `poll`/`poll_batch` — returns `OM_ERR_BUS_EPOCH_CHANGED` if producer
+restarted.
 
-Add a producer epoch (monotonic counter or timestamp) to the SHM header:
+#### R2: Stale Consumer Detection ✅ Done
 
-```c
-uint64_t producer_epoch;   /* incremented on each stream_create */
-```
-
-Consumers check epoch on each poll. If epoch changes → full re-attach needed.
-
-#### R2: Stale Consumer Detection
-
-If a consumer crashes, its tail stops advancing and eventually blocks the
-producer. Add a per-consumer heartbeat timestamp:
-
-```c
-typedef struct OmBusConsumerTail {
-    _Atomic uint64_t tail;
-    _Atomic uint64_t wal_seq;
-    _Atomic uint64_t last_poll_ns;   /* clock_gettime(MONOTONIC) */
-    uint8_t _pad[40];                /* adjusted pad */
-} OmBusConsumerTail;
-```
-
-Producer can check `last_poll_ns` and skip stale consumers in `min_tail`
-calculation. Requires a configurable staleness threshold (e.g., 5 seconds).
+`last_poll_ns` (monotonic) added to `OmBusConsumerTail`, updated on every poll.
+`staleness_ns` config field on `OmBusStreamConfig` (default 0 = disabled).
+Producer's backpressure loop uses `_om_bus_min_tail_live()` which skips
+consumers whose `last_poll_ns` is older than the threshold, preventing dead
+consumers from blocking the ring.
 
 #### R3: TCP Slow Client Warning
 
@@ -870,7 +854,7 @@ expected`. Default: off (backward compatible).
 6. F1: Reference relay process + CLI tool — 2 hr
 7. F2: WAL replay gap helper — 1 hr
 8. ~~F3: Consumer cursor persistence~~ ✅
-9. R1: Producer restart detection (epoch) — 1 hr
+9. ~~R1: Producer restart detection (epoch)~~ ✅
 
 **Phase 8 — Performance & Polish**:
 
@@ -878,4 +862,4 @@ expected`. Default: off (backward compatible).
 11. P2: Backpressure exponential backoff — 1 hr
 12. P6: Hardware CRC32 — 1 hr
 13. F4: TCP auto-reconnect wrapper — 2 hr
-14. R2: Stale consumer detection — 1 hr
+14. ~~R2: Stale consumer detection~~ ✅

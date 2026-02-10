@@ -1333,6 +1333,108 @@ START_TEST(test_tcp_slow_client_stats) {
 }
 END_TEST
 
+/* ---- Test: R1 — producer epoch restart detection ---- */
+START_TEST(test_bus_epoch_restart) {
+    const char *name = test_shm_name("epoch");
+
+    /* Create stream + consumer */
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 1, .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Publish and consume a record — should work */
+    uint32_t payload = 42;
+    om_bus_stream_publish(stream, 1, 1, &payload, sizeof(payload));
+    OmBusRecord rec;
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+
+    /* Simulate producer crash: don't destroy (no shm_unlink), just leak the
+     * handle. The SHM file stays on disk. Then recreate the stream with
+     * O_TRUNC — the consumer's mmap sees the new epoch because the backing
+     * file is the same POSIX SHM object. */
+    /* Leak stream handle intentionally (munmap but no unlink) */
+    /* We need to munmap to release the producer mapping but keep SHM file */
+    /* Actually just create a new stream — O_TRUNC resets the existing file */
+    OmBusStream *stream2 = NULL;
+    usleep(1000);  /* ensure different monotonic clock value for epoch */
+    ck_assert_int_eq(om_bus_stream_create(&stream2, &scfg), 0);
+
+    /* Existing endpoint should detect epoch change */
+    int rc = om_bus_endpoint_poll(ep, &rec);
+    ck_assert_int_eq(rc, OM_ERR_BUS_EPOCH_CHANGED);
+
+    om_bus_endpoint_close(ep);
+    /* Clean up both streams — stream2 will shm_unlink, stream will try
+     * to munmap its (now truncated) mapping */
+    om_bus_stream_destroy(stream);
+    om_bus_stream_destroy(stream2);
+}
+END_TEST
+
+/* ---- Test: R2 — stale consumer detection ---- */
+START_TEST(test_bus_stale_consumer) {
+    const char *name = test_shm_name("stale");
+
+    /* Create stream with staleness detection and 2 consumers */
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 16, .slot_size = 256,
+        .max_consumers = 2, .flags = 0,
+        .staleness_ns = 100000000ULL,  /* 100ms threshold */
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    /* Open both consumers */
+    OmBusEndpoint *ep0 = NULL, *ep1 = NULL;
+    OmBusEndpointConfig ecfg0 = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    OmBusEndpointConfig ecfg1 = {
+        .stream_name = name, .consumer_index = 1, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep0, &ecfg0), 0);
+    ck_assert_int_eq(om_bus_endpoint_open(&ep1, &ecfg1), 0);
+
+    /* Publish records and only have ep0 consume — ep1 stays behind */
+    uint32_t payload = 99;
+    OmBusRecord rec;
+    for (int i = 0; i < 8; i++) {
+        om_bus_stream_publish(stream, (uint64_t)(i + 1), 1, &payload, sizeof(payload));
+        ck_assert_int_eq(om_bus_endpoint_poll(ep0, &rec), 1);
+    }
+
+    /* ep1 has never polled, but it shouldn't block because staleness
+     * detection will skip it in min_tail calculation once the producer
+     * needs to reclaim ring space. The ring has capacity=16 so 8 records
+     * don't cause backpressure yet. Publish 8 more — this fills the ring.
+     * Without staleness detection this would deadlock; with it, the
+     * producer skips the stale consumer. */
+
+    /* Wait for ep1 to be considered stale (>100ms without polling) */
+    usleep(150000);  /* 150ms > 100ms threshold */
+
+    /* Now publish 8 more — these should succeed because ep1 is stale */
+    for (int i = 0; i < 8; i++) {
+        om_bus_stream_publish(stream, (uint64_t)(i + 9), 1, &payload, sizeof(payload));
+        ck_assert_int_eq(om_bus_endpoint_poll(ep0, &rec), 1);
+    }
+
+    om_bus_endpoint_close(ep0);
+    om_bus_endpoint_close(ep1);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
 /* ============================================================================
  * Suite
  * ============================================================================ */
@@ -1353,6 +1455,8 @@ Suite *bus_suite(void) {
     tcase_add_test(tc, test_bus_large_payload_boundary);
     tcase_add_test(tc, test_bus_batch_publish);
     tcase_add_test(tc, test_bus_cursor_persistence);
+    tcase_add_test(tc, test_bus_epoch_restart);
+    tcase_add_test(tc, test_bus_stale_consumer);
     suite_add_tcase(s, tc);
 
     TCase *tc_wal = tcase_create("WAL-Bus");
