@@ -648,3 +648,280 @@ Dependencies:
 | `test_tcp_protocol_error` | Corrupt frame magic → PROTOCOL error |
 
 All tests use loopback (`127.0.0.1`) with ephemeral port (`port=0`).
+
+## 12. Roadmap — Improvements & Future Work
+
+### 12.1 Performance Improvements
+
+#### P1: Batch Publish API
+
+Currently `om_bus_stream_publish()` refreshes `min_tail` and does an atomic
+store per record. A batch variant would amortize these costs:
+
+```c
+int om_bus_stream_publish_batch(OmBusStream *s, const OmBusRecord *recs,
+                                 uint32_t count);
+```
+
+- Single `min_tail` refresh for the entire batch
+- Single `atomic_store` for head advancement at the end
+- Expected improvement: ~2-3x throughput for burst publishes
+
+#### P2: Backpressure Spin Optimization
+
+Current spin loop: `cpu_relax()` for 1024 iterations then `sched_yield()`.
+This is ~10us busy-wait before yielding, which spikes p99 latency when ring
+is near full.
+
+Improvement: exponential backoff with configurable policy:
+
+```
+Phase 1:  10 iterations   → cpu_relax()         (~100ns)
+Phase 2:  32 iterations   → cpu_relax()         (~300ns)
+Phase 3:  sched_yield()                          (~50-100us)
+Phase 4:  futex_wait() on head (optional)        (wake on consumer advance)
+```
+
+Optional callback for sustained backpressure (>N spins):
+
+```c
+typedef void (*OmBusBackpressureCb)(uint64_t head, uint64_t min_tail, void *ctx);
+```
+
+This gives the engine visibility into stalled consumers rather than silently
+blocking.
+
+#### P3: TCP Client Recv Buffer — Deferred Compaction
+
+`om_bus_tcp_client_poll()` currently `memmove()`s on every call to compact the
+recv buffer. At 256KB buffer size this can cost ~1us per poll.
+
+Improvement: only compact when `recv_offset > recv_buf_size / 2`. This halves
+the number of `memmove()` calls and keeps frame data contiguous enough for
+parsing.
+
+#### P4: TCP Server Send Buffer — Offset-Based Write
+
+`broadcast()` compacts each client's send buffer when it doesn't fit. Better:
+track `send_offset` (already done) and only compact in `poll_io()` after
+flushing, not in the broadcast hot path. Current code already partially does
+this — the remaining optimization is to skip compaction in `broadcast()` if
+`send_used - send_offset + frame_size <= send_buf_size` (i.e., there's room
+at the end even without compacting).
+
+#### P5: CRC32 Table Init — Thread Safety
+
+`_om_bus_crc32_init()` uses a plain `bool` flag. Benign race (table computed
+identically by all threads), but should use `_Atomic bool` or `pthread_once()`
+for correctness.
+
+#### P6: SIMD CRC32
+
+Replace software CRC32 table lookup with hardware-accelerated `_mm_crc32_u64`
+(x86 SSE4.2) or `__crc32cd` (ARM). ~10x faster for large payloads.
+
+### 12.2 Functional Improvements
+
+#### F1: Reference Relay Process
+
+No relay implementation exists — only the documented loop pattern (section
+5.3). Provide a library function and optional standalone tool:
+
+```c
+typedef struct OmBusRelayConfig {
+    OmBusEndpoint     *ep;           /* SHM consumer */
+    OmBusTcpServer    *srv;          /* TCP broadcaster */
+    volatile bool     *running;      /* shutdown flag */
+    uint32_t           poll_us;      /* sleep between empty polls (default 10) */
+} OmBusRelayConfig;
+
+int om_bus_relay_run(const OmBusRelayConfig *cfg);
+```
+
+Plus a `tools/om_bus_relay.c` CLI:
+
+```
+./om_bus_relay --shm /om-bus-engine-0 --consumer 7 --bind 0.0.0.0:9100
+```
+
+#### F2: WAL Replay Helper for Gap Recovery
+
+When a consumer detects `OM_ERR_BUS_GAP_DETECTED`, it needs to replay the
+WAL from its last known `wal_seq` to catch up. Provide a helper:
+
+```c
+int om_bus_replay_gap(const char *wal_path, uint64_t from_seq,
+                       uint64_t to_seq, OmMarketWorker *w);
+```
+
+This wraps `om_wal_replay_init()` → iterate → `om_market_worker_process()`
+for the missing range. Same pattern for public workers.
+
+#### F3: Consumer Cursor Persistence
+
+Optional disk-backed cursor so consumers can resume after restart without
+full WAL replay:
+
+```c
+int om_bus_endpoint_save_cursor(const OmBusEndpoint *ep, const char *path);
+int om_bus_endpoint_load_cursor(const char *path, uint64_t *wal_seq_out);
+```
+
+Format: 16-byte file — `[magic:4][wal_seq:8][crc32:4]`.
+
+#### F4: TCP Client Auto-Reconnect
+
+Currently the client returns `OM_ERR_BUS_TCP_DISCONNECTED` and the app must
+manually reconnect. Provide an optional auto-reconnect wrapper:
+
+```c
+typedef struct OmBusTcpAutoClientConfig {
+    OmBusTcpClientConfig base;
+    uint32_t max_retries;        /* 0 = unlimited */
+    uint32_t retry_base_ms;      /* initial backoff (default 100ms) */
+    uint32_t retry_max_ms;       /* max backoff (default 5000ms) */
+} OmBusTcpAutoClientConfig;
+
+int om_bus_tcp_auto_client_create(OmBusTcpAutoClient **out,
+                                   const OmBusTcpAutoClientConfig *cfg);
+int om_bus_tcp_auto_client_poll(OmBusTcpAutoClient *client, OmBusRecord *rec);
+```
+
+`auto_poll()` returns `0` during reconnect backoff, `1` on record, negative
+on permanent failure. Reconnect attempts happen inside `auto_poll()`.
+
+#### F5: TCP Heartbeat / Keep-Alive
+
+Long idle periods (no WAL activity) can trigger firewall or NAT timeout.
+Two options:
+
+1. **TCP_KEEPALIVE** socket option — simple, OS-managed, no wire protocol
+   change. Set `TCP_KEEPIDLE=30`, `TCP_KEEPINTVL=10`, `TCP_KEEPCNT=3`.
+
+2. **Application-level heartbeat** — server broadcasts an empty frame
+   (`payload_len=0`, `wal_type=0xFF`) every N seconds when idle. Client
+   detects stale connection if no frame received within timeout.
+
+Option 1 is preferred (simpler, no protocol change). Add to server create
+and client connect.
+
+#### F6: Server-Side Metrics
+
+```c
+typedef struct OmBusTcpServerStats {
+    uint64_t records_broadcast;      /* total frames broadcast */
+    uint64_t bytes_broadcast;        /* total payload bytes */
+    uint64_t clients_accepted;       /* cumulative accepts */
+    uint64_t clients_disconnected;   /* cumulative disconnects */
+    uint64_t slow_client_drops;      /* disconnects due to buffer overflow */
+} OmBusTcpServerStats;
+
+void om_bus_tcp_server_stats(const OmBusTcpServer *srv, OmBusTcpServerStats *out);
+```
+
+Similarly for SHM:
+
+```c
+typedef struct OmBusStreamStats {
+    uint64_t records_published;
+    uint64_t backpressure_spins;     /* total spin-wait iterations */
+    uint64_t head;
+    uint64_t min_tail;
+} OmBusStreamStats;
+
+void om_bus_stream_stats(const OmBusStream *s, OmBusStreamStats *out);
+```
+
+### 12.3 Resilience Improvements
+
+#### R1: Producer Restart Detection
+
+When a new `OmBusStream` is created over an existing SHM name, the old SHM
+is unlinked and recreated. But if the producer crashes without cleanup,
+consumers may still be attached to stale SHM.
+
+Add a producer epoch (monotonic counter or timestamp) to the SHM header:
+
+```c
+uint64_t producer_epoch;   /* incremented on each stream_create */
+```
+
+Consumers check epoch on each poll. If epoch changes → full re-attach needed.
+
+#### R2: Stale Consumer Detection
+
+If a consumer crashes, its tail stops advancing and eventually blocks the
+producer. Add a per-consumer heartbeat timestamp:
+
+```c
+typedef struct OmBusConsumerTail {
+    _Atomic uint64_t tail;
+    _Atomic uint64_t wal_seq;
+    _Atomic uint64_t last_poll_ns;   /* clock_gettime(MONOTONIC) */
+    uint8_t _pad[40];                /* adjusted pad */
+} OmBusConsumerTail;
+```
+
+Producer can check `last_poll_ns` and skip stale consumers in `min_tail`
+calculation. Requires a configurable staleness threshold (e.g., 5 seconds).
+
+#### R3: TCP Slow Client Warning
+
+Before disconnecting a slow client, send a "warning" frame so the client
+knows to expect disconnection and can log/alert:
+
+```
+wal_type = 0xFE (reserved: SLOW_CLIENT_WARNING)
+payload  = [bytes_pending:4][buf_capacity:4]
+```
+
+Client can use this to trigger WAL replay preparation before the actual
+disconnect.
+
+#### R4: Gap Detection — Reject Reordered Records
+
+Current behavior: if `wal_seq < expected`, the record is silently accepted.
+This hides potential bugs in the relay or network layer.
+
+Add an option to return `OM_ERR_BUS_REORDER_DETECTED` for `wal_seq <
+expected`. Default: off (backward compatible).
+
+### 12.4 Missing Test Coverage
+
+| Test | What it covers | Priority |
+|------|----------------|----------|
+| TCP client reconnect + resume | Disconnect, reconnect, verify wal_seq continuity | High |
+| TCP max clients exhaustion | Connect max_clients+1, verify 65th rejected | Medium |
+| TCP frame split across recv | Header arrives in 2 TCP segments | Medium |
+| SHM producer restart | Unlink+recreate SHM, consumer detects | High |
+| Large payload at boundary | `payload_len = slot_size - 24` exactly | Low |
+| Batch poll with CRC enabled | CRC validated per record in batch | Medium |
+| Multiple sequential gaps | wal_seq 1→5→20→100 | Low |
+| SHM ring uint64 wrap | Head approaches UINT64_MAX | Low |
+| Concurrent consumer poll | Two consumers polling same stream simultaneously | Medium |
+| TCP server under load | 50+ clients, 10K records broadcast | Medium |
+
+### 12.5 Implementation Priority
+
+**Phase 6 — Operational Readiness** (next):
+
+1. F5: TCP keep-alive (`TCP_KEEPALIVE` socket option) — 30 min
+2. P5: CRC32 thread safety (`_Atomic bool`) — 10 min
+3. P3: TCP recv buffer deferred compaction — 30 min
+4. F6: Server/stream stats structs — 1 hr
+5. Test: TCP reconnect, max clients, frame split — 2 hr
+
+**Phase 7 — Recovery & Tooling**:
+
+6. F1: Reference relay process + CLI tool — 2 hr
+7. F2: WAL replay gap helper — 1 hr
+8. F3: Consumer cursor persistence — 1 hr
+9. R1: Producer restart detection (epoch) — 1 hr
+
+**Phase 8 — Performance & Polish**:
+
+10. P1: Batch publish API — 2 hr
+11. P2: Backpressure exponential backoff — 1 hr
+12. P6: Hardware CRC32 — 1 hr
+13. F4: TCP auto-reconnect wrapper — 2 hr
+14. R2: Stale consumer detection — 1 hr
