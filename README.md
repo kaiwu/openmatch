@@ -25,16 +25,33 @@ Consumes WAL records and builds publishable price ladders. Two worker types:
 - **Private workers** (org-sharded) — per-org dealable qty via `dealable()` callback, compute-on-publish with no per-org state (~15-25 ns/org fan-out)
 - Delta or full-snapshot publishing, top-N enforcement, dirty tracking
 
-### OmBus — SHM Message Bus (`libombus`)
+### OmBus — WAL Distribution Bus (`libombus`)
 
-Shared-memory ring buffer for distributing WAL records across process
-boundaries without serialization or syscalls in the hot path.
+Distributes WAL records across process and machine boundaries via two
+transports: shared memory (same host) and TCP (cross-machine).
 
-- **Producer** (`OmBusStream`) — creates SHM, publishes records inline (not pointers)
+**SHM transport** (same host, ~50-80ns publish, ~30-50ns poll):
+
+- **Producer** (`OmBusStream`) — creates SHM ring, publishes records inline (not pointers)
 - **Consumer** (`OmBusEndpoint`) — attaches to SHM, non-blocking poll with zero-copy option
-- **WAL hook** — `om_bus_attach_wal(wal, stream)` wires the engine's WAL post-write callback to the bus with one call (header-only, no link dependency from libopenmatch → libombus)
-- **Worker helpers** — `om_bus_poll_worker(ep, w)` / `om_bus_poll_public(ep, w)` feed bus records directly into market workers
-- Per-consumer tail tracking, CRC32 validation, gap detection, backpressure
+- Batch publish/poll, CRC32C validation (HW-accelerated on x86/ARM), gap detection
+- Phased backpressure (spin → yield → callback), stale consumer detection
+- Producer restart detection (epoch), cursor persistence for resume after restart
+
+**TCP transport** (cross-machine, ~10-50us):
+
+- **Server** (`OmBusTcpServer`) — binds TCP port, broadcasts frames to all clients
+- **Client** (`OmBusTcpClient`) — connects, polls frames into `OmBusRecord`
+- **Auto-reconnect** (`OmBusTcpAutoClient`) — transparent reconnection with exponential backoff
+- Slow client warning before disconnect, reorder detection, server-side stats
+- OS-managed TCP keep-alive on all sockets
+
+**Glue headers** (header-only, no link dependencies):
+
+- `om_bus_attach_wal(wal, stream)` — wires WAL post-write callback to bus publish
+- `om_bus_poll_worker(ep, w)` / `om_bus_tcp_poll_worker(client, w)` — feed into market workers
+- `om_bus_relay_run()` — reference SHM → TCP relay loop
+- `om_bus_replay_gap()` — WAL replay for gap recovery
 
 ## Project Layout
 
@@ -52,15 +69,20 @@ boundaries without serialization or syscalls in the hot path.
 │   ├── openmarket/           # Market data headers
 │   │   ├── om_market.h       # Public/private ladder aggregation
 │   │   └── om_worker.h       # Lock-free ring for WAL distribution
-│   └── ombus/                # SHM message bus headers
-│       ├── om_bus.h           # Stream (producer) + Endpoint (consumer)
-│       ├── om_bus_error.h     # Bus error codes
+│   └── ombus/                # WAL distribution bus headers
+│       ├── om_bus.h           # SHM stream (producer) + endpoint (consumer)
+│       ├── om_bus_tcp.h       # TCP server + client + auto-reconnect
+│       ├── om_bus_error.h     # Bus error codes (-800 to -823)
 │       ├── om_bus_wal.h       # Header-only: WAL → bus glue
-│       └── om_bus_market.h    # Header-only: bus → market worker helpers
+│       ├── om_bus_market.h    # Header-only: SHM bus → market worker
+│       ├── om_bus_tcp_market.h # Header-only: TCP bus → market worker
+│       ├── om_bus_relay.h     # Header-only: SHM → TCP relay loop
+│       └── om_bus_replay.h    # Header-only: WAL replay gap recovery
 ├── src/                      # Implementations
 │   ├── om_engine.c           # Matching engine
 │   ├── om_market.c           # Market data aggregation
-│   └── om_bus_shm.c          # SHM bus transport
+│   ├── om_bus_shm.c          # SHM bus transport
+│   └── om_bus_tcp.c          # TCP bus transport (server + client)
 ├── tests/                    # check-based unit tests
 ├── tools/                    # Utility binaries + awk helpers
 │   ├── wal_reader.c
@@ -229,34 +251,31 @@ capacity planning, and per-record cost model.
 
 ### OmBus
 
-SHM ring buffer for cross-process WAL record distribution. No serialization
-or syscalls in the hot path -- records are copied inline into shared memory.
+Two transports for WAL record distribution: SHM for same-host workers,
+TCP for remote hosts. No serialization -- records are copied inline.
 
 ```
-Engine -> om_wal_insert() -> WAL buffer -> post_write() -> bus publish
-       -> om_wal_match()  -> WAL buffer -> post_write() -> bus publish
-                                                    |
-                                          OmBusEndpoint (consumer process)
-                                                    |
-                                          om_bus_poll_worker() -> OmMarketWorker
+Engine -> WAL -> post_write() -> OmBusStream (SHM ring)
+                                       |
+                        +--------------+--------------+
+                        |                             |
+                 OmBusEndpoint             TCP Relay (om_bus_relay)
+                        |                       |
+                 OmMarketWorker          OmBusTcpServer
+                  (local)                  |    |    |
+                                    OmBusTcpClient (remote hosts)
+                                           |
+                                    OmMarketWorker
 ```
 
-**Producer side** (`OmBusStream`):
+**SHM** (`OmBusStream` / `OmBusEndpoint`): ~50-80ns publish, ~30-50ns poll.
+Inline payload, zero-copy option, CRC32C, batch publish/poll, backpressure.
 
-- `om_bus_stream_create()` creates a named SHM region with a fixed-slot ring
-- `om_bus_stream_publish()` copies payload into the next slot (spins on full ring)
-- `om_bus_attach_wal(wal, stream)` wires the WAL's `post_write` hook to publish
-  every WAL record to the bus automatically (header-only, no link dependency)
+**TCP** (`OmBusTcpServer` / `OmBusTcpClient`): ~10-50us. Non-blocking poll-based
+I/O, auto-reconnect wrapper, slow client warning, server stats, keep-alive.
 
-**Consumer side** (`OmBusEndpoint`):
-
-- `om_bus_endpoint_open()` attaches to an existing SHM stream
-- `om_bus_endpoint_poll()` returns the next record (non-blocking, zero-copy option)
-- `om_bus_poll_worker(ep, w)` / `om_bus_poll_public(ep, w)` poll and feed directly
-  into market workers (header-only helpers)
-
-Features: per-consumer tail tracking, CRC32 validation, WAL sequence gap
-detection, configurable slot size and ring capacity.
+See [docs/msg_bus.md](docs/msg_bus.md) for wire protocol, memory layout, and
+full API reference.
 
 ## Example (Minimal)
 
