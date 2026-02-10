@@ -1674,9 +1674,346 @@ START_TEST(test_tcp_reorder_detection) {
 }
 END_TEST
 
-/* ============================================================================
- * Suite
- * ============================================================================ */
+/* ---- Test: batch poll with CRC enabled ---- */
+START_TEST(test_bus_batch_poll_crc) {
+    const char *name = test_shm_name("batchcrc");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 1, .flags = OM_BUS_FLAG_CRC,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = true,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Publish 8 records with CRC */
+    for (int i = 0; i < 8; i++) {
+        uint64_t val = (uint64_t)(i * 7 + 13);
+        om_bus_stream_publish(stream, (uint64_t)(i + 1), 1, &val, sizeof(val));
+    }
+
+    /* Batch poll all 8 — CRC should validate for each */
+    OmBusRecord recs[16];
+    int count = om_bus_endpoint_poll_batch(ep, recs, 16);
+    ck_assert_int_eq(count, 8);
+    for (int i = 0; i < 8; i++) {
+        ck_assert_uint_eq(recs[i].wal_seq, (uint64_t)(i + 1));
+        uint64_t val;
+        memcpy(&val, recs[i].payload, sizeof(val));
+        ck_assert_uint_eq(val, (uint64_t)(i * 7 + 13));
+    }
+
+    /* Now corrupt one record's payload and verify batch stops there */
+    for (int i = 0; i < 4; i++) {
+        uint64_t val = (uint64_t)(i + 100);
+        om_bus_stream_publish(stream, (uint64_t)(i + 9), 1, &val, sizeof(val));
+    }
+    /* Corrupt slot 0's payload (first record of new batch) */
+    {
+        int fd = shm_open(name, O_RDWR, 0);
+        ck_assert_int_ge(fd, 0);
+        size_t map_len = 4096 + 1 * 64 + 256 * 16;
+        char *m = mmap(NULL, map_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        ck_assert_ptr_ne(m, MAP_FAILED);
+        close(fd);
+        /* Slot at index (8 & 63) = 8: offset = header + tails + 8*slot_size + slot_header */
+        char *p = m + 4096 + 1 * 64 + 8 * 256 + 24;
+        p[0] ^= 0xFF;
+        munmap(m, map_len);
+    }
+
+    /* Batch should return 0 (first record CRC fails, batch stops before it) */
+    count = om_bus_endpoint_poll_batch(ep, recs, 16);
+    ck_assert_int_eq(count, 0);
+
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+/* ---- Test: multiple sequential gaps ---- */
+START_TEST(test_bus_multiple_gaps) {
+    const char *name = test_shm_name("multigap");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 1, .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Publish sequence: 1, 5, 20, 100 — three gaps */
+    uint32_t val = 0;
+    uint64_t seqs[] = {1, 5, 20, 100};
+    for (int i = 0; i < 4; i++) {
+        om_bus_stream_publish(stream, seqs[i], 1, &val, sizeof(val));
+    }
+
+    OmBusRecord rec;
+    /* seq 1: first, no gap */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+
+    /* seq 5: gap (expected 2) */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), OM_ERR_BUS_GAP_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 5);
+
+    /* seq 20: gap (expected 6) */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), OM_ERR_BUS_GAP_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 20);
+
+    /* seq 100: gap (expected 21) */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), OM_ERR_BUS_GAP_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 100);
+
+    /* empty */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 0);
+
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+/* ---- Test: concurrent consumer poll (two consumers, same stream) ---- */
+START_TEST(test_bus_concurrent_consumers) {
+    const char *name = test_shm_name("concurrent");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 4, .flags = OM_BUS_FLAG_CRC,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep0 = NULL, *ep1 = NULL;
+    OmBusEndpointConfig ecfg0 = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = true,
+    };
+    OmBusEndpointConfig ecfg1 = {
+        .stream_name = name, .consumer_index = 1, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep0, &ecfg0), 0);
+    ck_assert_int_eq(om_bus_endpoint_open(&ep1, &ecfg1), 0);
+
+    /* Publish 20 records */
+    for (int i = 0; i < 20; i++) {
+        uint64_t val = (uint64_t)(i * 3);
+        om_bus_stream_publish(stream, (uint64_t)(i + 1), 1, &val, sizeof(val));
+    }
+
+    /* Interleaved poll: ep0 reads 1, ep1 reads 2, ep0 reads 2, ep1 reads 1... */
+    OmBusRecord rec;
+    uint64_t ep0_count = 0, ep1_count = 0;
+    for (int round = 0; round < 20; round++) {
+        /* ep0 reads some */
+        int n = (round % 3) + 1;
+        for (int j = 0; j < n && ep0_count < 20; j++) {
+            int rc = om_bus_endpoint_poll(ep0, &rec);
+            if (rc <= 0) break;
+            ck_assert_uint_eq(rec.wal_seq, ep0_count + 1);
+            ep0_count++;
+        }
+        /* ep1 reads some */
+        n = (round % 2) + 1;
+        for (int j = 0; j < n && ep1_count < 20; j++) {
+            int rc = om_bus_endpoint_poll(ep1, &rec);
+            if (rc <= 0) break;
+            ck_assert_uint_eq(rec.wal_seq, ep1_count + 1);
+            uint64_t val;
+            memcpy(&val, rec.payload, sizeof(val));
+            ck_assert_uint_eq(val, ep1_count * 3);
+            ep1_count++;
+        }
+        if (ep0_count >= 20 && ep1_count >= 20) break;
+    }
+
+    ck_assert_uint_eq(ep0_count, 20);
+    ck_assert_uint_eq(ep1_count, 20);
+
+    om_bus_endpoint_close(ep0);
+    om_bus_endpoint_close(ep1);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+/* ---- Test: TCP client drains buffered frames before reporting disconnect ---- */
+START_TEST(test_tcp_drain_on_disconnect) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Broadcast 5 records, flush, then destroy server */
+    uint32_t payload = 0;
+    for (int i = 1; i <= 5; i++) {
+        payload = (uint32_t)(i * 10);
+        om_bus_tcp_server_broadcast(srv, (uint64_t)i, 1, &payload, sizeof(payload));
+    }
+    om_bus_tcp_server_poll_io(srv);
+    usleep(10000);
+
+    /* Destroy server — sends FIN */
+    om_bus_tcp_server_destroy(srv);
+    usleep(10000);
+
+    /* Client should drain all 5 buffered frames before reporting disconnect */
+    OmBusRecord rec;
+    int records = 0;
+    for (int i = 0; i < 10; i++) {
+        int rc = om_bus_tcp_client_poll(client, &rec);
+        if (rc == 1) {
+            records++;
+            ck_assert_uint_eq(rec.wal_seq, (uint64_t)records);
+        } else if (rc == OM_ERR_BUS_TCP_DISCONNECTED) {
+            break;
+        }
+    }
+    ck_assert_int_eq(records, 5);
+
+    om_bus_tcp_client_close(client);
+}
+END_TEST
+
+/* ---- Test: TCP auto-reconnect max retries exhaustion ---- */
+START_TEST(test_tcp_auto_reconnect_max_retries) {
+    /* Create server, connect auto-client, then destroy server */
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    OmBusTcpAutoClient *ac = NULL;
+    OmBusTcpAutoClientConfig acfg = {
+        .base = { .host = "127.0.0.1", .port = port, .recv_buf_size = 0 },
+        .max_retries = 2,       /* give up after 2 retries */
+        .retry_base_ms = 10,
+        .retry_max_ms = 20,
+    };
+    ck_assert_int_eq(om_bus_tcp_auto_client_create(&ac, &acfg), 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Destroy server */
+    om_bus_tcp_server_destroy(srv);
+
+    /* Trigger disconnect detection */
+    OmBusRecord rec;
+    om_bus_tcp_auto_client_poll(ac, &rec);
+
+    /* Wait for retries to exhaust (2 retries × 20ms max backoff) */
+    for (int i = 0; i < 20; i++) {
+        usleep(25000);
+        int rc = om_bus_tcp_auto_client_poll(ac, &rec);
+        if (rc == OM_ERR_BUS_TCP_DISCONNECTED) {
+            /* Permanent failure after max retries */
+            break;
+        }
+    }
+
+    /* Should now return permanent disconnect */
+    int rc = om_bus_tcp_auto_client_poll(ac, &rec);
+    ck_assert_int_eq(rc, OM_ERR_BUS_TCP_DISCONNECTED);
+
+    om_bus_tcp_auto_client_close(ac);
+}
+END_TEST
+
+/* ---- Test: TCP server under load (many clients, many records) ---- */
+START_TEST(test_tcp_server_load) {
+    OmBusTcpServer *srv = tcp_test_server(64, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    /* Connect 16 clients */
+    OmBusTcpClient *clients[16];
+    for (int i = 0; i < 16; i++) {
+        clients[i] = tcp_test_client(port, 0);
+    }
+    om_bus_tcp_server_poll_io(srv);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 16);
+
+    /* Broadcast 500 records, flushing periodically */
+    for (int i = 0; i < 500; i++) {
+        uint32_t val = (uint32_t)i;
+        om_bus_tcp_server_broadcast(srv, (uint64_t)(i + 1), 1, &val, sizeof(val));
+        if ((i + 1) % 50 == 0) {
+            om_bus_tcp_server_poll_io(srv);
+        }
+    }
+    om_bus_tcp_server_poll_io(srv);
+    usleep(50000);
+
+    /* Verify each client received all 500 records */
+    for (int c = 0; c < 16; c++) {
+        int count = 0;
+        OmBusRecord rec;
+        for (int attempt = 0; attempt < 1500; attempt++) {
+            int rc = om_bus_tcp_client_poll(clients[c], &rec);
+            if (rc == 1 || rc == OM_ERR_BUS_GAP_DETECTED) {
+                count++;
+                if (count >= 500) break;
+            } else if (rc == 0) {
+                usleep(500);
+            } else {
+                break;
+            }
+        }
+        ck_assert_int_eq(count, 500);
+    }
+
+    /* Check stats */
+    OmBusTcpServerStats stats;
+    om_bus_tcp_server_stats(srv, &stats);
+    ck_assert_uint_eq(stats.records_broadcast, 500);
+    ck_assert_uint_eq(stats.clients_accepted, 16);
+
+    for (int i = 0; i < 16; i++) {
+        om_bus_tcp_client_close(clients[i]);
+    }
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: SHM ring wrap-around with high head values ---- */
+START_TEST(test_bus_ring_wrap) {
+    const char *name = test_shm_name("wrap");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 16, .slot_size = 64,
+        .max_consumers = 1, .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = true,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Publish and consume 256 records through a 16-slot ring (16 full wraps) */
+    OmBusRecord rec;
+    for (int i = 0; i < 256; i++) {
+        uint32_t val = (uint32_t)(i * 7);
+        ck_assert_int_eq(om_bus_stream_publish(stream, (uint64_t)(i + 1), 1,
+                                                &val, sizeof(val)), 0);
+        ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+        ck_assert_uint_eq(rec.wal_seq, (uint64_t)(i + 1));
+        uint32_t out;
+        memcpy(&out, rec.payload, sizeof(out));
+        ck_assert_uint_eq(out, (uint32_t)(i * 7));
+    }
+
+    /* Verify correct wal_seq after many wraps */
+    ck_assert_uint_eq(om_bus_endpoint_wal_seq(ep), 256);
+
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
 
 Suite *bus_suite(void) {
     Suite *s = suite_create("Bus");
@@ -1698,6 +2035,10 @@ Suite *bus_suite(void) {
     tcase_add_test(tc, test_bus_stale_consumer);
     tcase_add_test(tc, test_bus_relay);
     tcase_add_test(tc, test_bus_reorder_detection);
+    tcase_add_test(tc, test_bus_batch_poll_crc);
+    tcase_add_test(tc, test_bus_multiple_gaps);
+    tcase_add_test(tc, test_bus_concurrent_consumers);
+    tcase_add_test(tc, test_bus_ring_wrap);
     suite_add_tcase(s, tc);
 
     TCase *tc_wal = tcase_create("WAL-Bus");
@@ -1708,6 +2049,7 @@ Suite *bus_suite(void) {
     suite_add_tcase(s, tc_wal);
 
     TCase *tc_tcp = tcase_create("TCP");
+    tcase_set_timeout(tc_tcp, 30);
     tcase_add_test(tc_tcp, test_tcp_create_destroy);
     tcase_add_test(tc_tcp, test_tcp_connect_disconnect);
     tcase_add_test(tc_tcp, test_tcp_single_record);
@@ -1725,6 +2067,9 @@ Suite *bus_suite(void) {
     tcase_add_test(tc_tcp, test_tcp_auto_reconnect);
     tcase_add_test(tc_tcp, test_tcp_slow_client_warning);
     tcase_add_test(tc_tcp, test_tcp_reorder_detection);
+    tcase_add_test(tc_tcp, test_tcp_drain_on_disconnect);
+    tcase_add_test(tc_tcp, test_tcp_auto_reconnect_max_retries);
+    tcase_add_test(tc_tcp, test_tcp_server_load);
     suite_add_tcase(s, tc_tcp);
 
     return s;
