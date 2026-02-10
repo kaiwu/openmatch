@@ -463,6 +463,8 @@ void     om_bus_tcp_client_close(OmBusTcpClient *client);
 - `OM_ERR_BUS_GAP_DETECTED` — wal_seq gap (record still populated)
 - `OM_ERR_BUS_TCP_DISCONNECTED` — peer closed or recv error
 - `OM_ERR_BUS_TCP_PROTOCOL` — frame magic mismatch
+- `OM_ERR_BUS_TCP_SLOW_WARNING` — server warning before disconnect
+- `OM_ERR_BUS_REORDER_DETECTED` — wal_seq backward (when `REJECT_REORDER` flag set)
 
 ### 5.7 Platform Portability
 
@@ -512,7 +514,7 @@ int om_bus_tcp_poll_public(OmBusTcpClient *client, OmMarketPublicWorker *w);
 
 ## 7. Error Codes
 
-Range **-800 to -899** in `om_bus_error.h`:
+Range **-800 to -823** in `om_bus_error.h`:
 
 ```c
 /* SHM errors */
@@ -538,6 +540,12 @@ OM_ERR_BUS_TCP_DISCONNECTED = -816,  /* TCP peer disconnected */
 OM_ERR_BUS_TCP_PROTOCOL     = -817,  /* TCP frame magic mismatch */
 OM_ERR_BUS_TCP_IO           = -818,  /* TCP poll() error */
 OM_ERR_BUS_TCP_MAX_CLIENTS  = -819,  /* TCP max clients reached */
+
+/* Resilience errors */
+OM_ERR_BUS_EPOCH_CHANGED    = -820,  /* Producer epoch changed (restart) */
+OM_ERR_BUS_CONSUMER_STALE   = -821,  /* Consumer heartbeat stale */
+OM_ERR_BUS_TCP_SLOW_WARNING = -822,  /* Server warned: slow client */
+OM_ERR_BUS_REORDER_DETECTED = -823,  /* WAL sequence went backward */
 ```
 
 ## 8. Resilience
@@ -587,15 +595,17 @@ Default TCP: 256 KB send buffer × max_clients (64) = **~16 MB server-side**.
 include/ombus/
     om_bus.h                 # SHM stream + endpoint API
     om_bus_tcp.h             # TCP server + client API + frame header
-    om_bus_error.h           # Error codes (-800 to -819)
+    om_bus_error.h           # Error codes (-800 to -823)
     om_bus_wal.h             # Header-only: WAL post_write → bus publish
     om_bus_market.h          # Header-only: SHM bus → market worker
     om_bus_tcp_market.h      # Header-only: TCP bus → market worker
+    om_bus_relay.h           # Header-only: SHM → TCP relay loop
+    om_bus_replay.h          # Header-only: WAL replay gap recovery
 src/
     om_bus_shm.c             # SHM stream + endpoint implementation
     om_bus_tcp.c             # TCP server + client implementation
 tests/
-    test_bus.c               # SHM tests (10), WAL-Bus integration (4), TCP tests (10)
+    test_bus.c               # SHM tests (17), WAL-Bus integration (4), TCP tests (17)
 ```
 
 Build artifacts: `libombus.so` / `libombus.a`
@@ -606,9 +616,9 @@ Dependencies:
 
 ## 11. Test Coverage
 
-103 tests total across all suites. Bus-specific tests:
+117 tests total across all suites. Bus-specific tests:
 
-**SHM TCase** (10 tests):
+**SHM TCase** (17 tests):
 
 | Test | Verifies |
 |------|----------|
@@ -622,6 +632,13 @@ Dependencies:
 | `test_bus_record_too_large` | Oversized payload → RECORD_TOO_LARGE |
 | `test_bus_magic_mismatch` | Corrupted SHM header → MAGIC_MISMATCH |
 | `test_bus_wal_seq_tracking` | endpoint_wal_seq() tracks correctly |
+| `test_bus_large_payload_boundary` | Max payload (slot_size - 24) with CRC |
+| `test_bus_batch_publish` | Batch publish API + stream stats |
+| `test_bus_cursor_persistence` | Save/load cursor, corrupt detection |
+| `test_bus_epoch_restart` | Producer epoch change → EPOCH_CHANGED |
+| `test_bus_stale_consumer` | Stale consumer skipped in backpressure |
+| `test_bus_relay` | SHM → relay → TCP → client roundtrip |
+| `test_bus_reorder_detection` | wal_seq backward → REORDER_DETECTED |
 
 **WAL-Bus TCase** (4 tests):
 
@@ -632,7 +649,7 @@ Dependencies:
 | `test_bus_wal_cancel` | Insert + cancel → INSERT + CANCEL on bus |
 | `test_bus_worker_roundtrip` | Engine → bus → market worker → correct qty |
 
-**TCP TCase** (10 tests):
+**TCP TCase** (17 tests):
 
 | Test | Verifies |
 |------|----------|
@@ -646,6 +663,13 @@ Dependencies:
 | `test_tcp_server_destroy_connected` | Destroy server → client poll returns DISCONNECTED |
 | `test_tcp_wal_seq_tracking` | client_wal_seq() tracks correctly |
 | `test_tcp_protocol_error` | Corrupt frame magic → PROTOCOL error |
+| `test_tcp_reconnect_resume` | Disconnect, reconnect, wal_seq continuity |
+| `test_tcp_max_clients` | max_clients+1 → extra rejected |
+| `test_tcp_server_stats` | records/bytes/accepted/disconnected counters |
+| `test_tcp_slow_client_stats` | slow_client_drops counter |
+| `test_tcp_auto_reconnect` | Auto-reconnect wrapper with backoff |
+| `test_tcp_slow_client_warning` | Warning frame (0xFE) delivered before disconnect |
+| `test_tcp_reorder_detection` | wal_seq backward → REORDER_DETECTED |
 
 All tests use loopback (`127.0.0.1`) with ephemeral port (`port=0`).
 
@@ -671,14 +695,11 @@ fires once when entering Phase 3, giving the engine visibility into stalls.
 or the buffer is full. This halves `memmove()` calls while keeping frame data
 contiguous for parsing.
 
-#### P4: TCP Server Send Buffer — Offset-Based Write
+#### P4: TCP Server Send Buffer — Fast Path ✅ Done
 
-`broadcast()` compacts each client's send buffer when it doesn't fit. Better:
-track `send_offset` (already done) and only compact in `poll_io()` after
-flushing, not in the broadcast hot path. Current code already partially does
-this — the remaining optimization is to skip compaction in `broadcast()` if
-`send_used - send_offset + frame_size <= send_buf_size` (i.e., there's room
-at the end even without compacting).
+`broadcast()` checks `send_used + frame_size <= send_buf_size` first (fast
+path goto) before attempting compaction. Only compacts when there's truly no
+room at the tail. This avoids `memmove` on the hot broadcast path.
 
 #### P5: CRC32 Table Init — Thread Safety ✅ Done
 
@@ -751,26 +772,27 @@ Producer's backpressure loop uses `_om_bus_min_tail_live()` which skips
 consumers whose `last_poll_ns` is older than the threshold, preventing dead
 consumers from blocking the ring.
 
-#### R3: TCP Slow Client Warning
+#### R3: TCP Slow Client Warning ✅ Done
 
-Before disconnecting a slow client, send a "warning" frame so the client
-knows to expect disconnection and can log/alert:
+Before disconnecting a slow client, the server injects a warning frame into
+the send buffer (if room):
 
 ```
 wal_type = 0xFE (reserved: SLOW_CLIENT_WARNING)
 payload  = [bytes_pending:4][buf_capacity:4]
 ```
 
-Client can use this to trigger WAL replay preparation before the actual
-disconnect.
+Client poll returns `OM_ERR_BUS_TCP_SLOW_WARNING` (-822) for this frame type.
+The server flushes remaining data (including the warning) before closing the
+connection via `shutdown(SHUT_WR)` + `close()`. The client drains buffered
+frames before reporting disconnection, ensuring the warning is delivered.
 
-#### R4: Gap Detection — Reject Reordered Records
+#### R4: Gap Detection — Reject Reordered Records ✅ Done
 
-Current behavior: if `wal_seq < expected`, the record is silently accepted.
-This hides potential bugs in the relay or network layer.
-
-Add an option to return `OM_ERR_BUS_REORDER_DETECTED` for `wal_seq <
-expected`. Default: off (backward compatible).
+When `OM_BUS_FLAG_REJECT_REORDER` (0x2) is set in stream flags (SHM) or
+client config flags (TCP), records with `wal_seq < expected_wal_seq` return
+`OM_ERR_BUS_REORDER_DETECTED` (-823). Default: off (backward compatible).
+Record is still populated so the caller can inspect the out-of-order sequence.
 
 ### 12.4 Missing Test Coverage
 

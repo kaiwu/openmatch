@@ -15,7 +15,8 @@
       "Bash(/tmp/check_size:*)",
       "Bash(./tests/test_runner:*)",
       "Bash(cmake:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(LD_PRELOAD=/usr/lib/libasan.so /tmp/test_warn:*)"
     ]
   }
 }

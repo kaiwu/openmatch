@@ -32,6 +32,8 @@ typedef enum OmBusError {
     OM_ERR_BUS_TCP_MAX_CLIENTS  = -819, /**< TCP max clients reached */
     OM_ERR_BUS_EPOCH_CHANGED    = -820, /**< Producer epoch changed (restart) */
     OM_ERR_BUS_CONSUMER_STALE   = -821, /**< Consumer heartbeat stale */
+    OM_ERR_BUS_TCP_SLOW_WARNING = -822, /**< Server warned: slow client, imminent disconnect */
+    OM_ERR_BUS_REORDER_DETECTED = -823, /**< WAL sequence went backward */
 } OmBusError;
 
 /**
@@ -65,6 +67,8 @@ static inline const char *om_bus_error_string(int err) {
         case OM_ERR_BUS_TCP_MAX_CLIENTS: return "TCP max clients reached";
         case OM_ERR_BUS_EPOCH_CHANGED:   return "Producer epoch changed";
         case OM_ERR_BUS_CONSUMER_STALE:  return "Consumer heartbeat stale";
+        case OM_ERR_BUS_TCP_SLOW_WARNING: return "TCP slow client warning";
+        case OM_ERR_BUS_REORDER_DETECTED: return "WAL sequence reorder detected";
         default:                         return "Unknown bus error";
     }
 }

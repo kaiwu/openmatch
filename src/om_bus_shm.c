@@ -566,13 +566,14 @@ int om_bus_endpoint_poll(OmBusEndpoint *ep, OmBusRecord *rec) {
         rec->payload = ep->copy_buf;
     }
 
-    /* Gap detection */
+    /* Gap / reorder detection */
     int result = 1;
     if (ep->expected_wal_seq > 0 && rec->wal_seq != ep->expected_wal_seq) {
         if (rec->wal_seq > ep->expected_wal_seq) {
             result = OM_ERR_BUS_GAP_DETECTED;
+        } else if (ep->flags & OM_BUS_FLAG_REJECT_REORDER) {
+            result = OM_ERR_BUS_REORDER_DETECTED;
         }
-        /* wal_seq < expected: duplicate/reorder — skip detection, just advance */
     }
     ep->expected_wal_seq = rec->wal_seq + 1;
 

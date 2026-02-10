@@ -1543,6 +1543,137 @@ START_TEST(test_tcp_auto_reconnect) {
 }
 END_TEST
 
+/* ---- Test: R3 — TCP slow client warning frame ---- */
+START_TEST(test_tcp_slow_client_warning) {
+    /* Tiny send buffer: 128 bytes — room for a few small frames */
+    OmBusTcpServer *srv = tcp_test_server(4, 128);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    om_bus_tcp_server_poll_io(srv);
+    ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 1);
+
+    /* Broadcast enough records to overflow the send buffer.
+     * Each frame = 16 (header) + 32 (payload) = 48 bytes.
+     * 128 / 48 ≈ 2 frames fit. Third should trigger overflow + warning. */
+    uint8_t payload[32];
+    memset(payload, 0xAA, sizeof(payload));
+    for (int i = 0; i < 10; i++) {
+        om_bus_tcp_server_broadcast(srv, (uint64_t)(i + 1), 1, payload, sizeof(payload));
+    }
+
+    /* Flush the data that was buffered before disconnect_pending */
+    om_bus_tcp_server_poll_io(srv);
+    usleep(20000);
+
+    /* Client should receive some records followed by the warning frame */
+    OmBusRecord rec;
+    int got_warning = 0;
+    int got_records = 0;
+    for (int attempt = 0; attempt < 30; attempt++) {
+        int rc = om_bus_tcp_client_poll(client, &rec);
+        if (rc == OM_ERR_BUS_TCP_SLOW_WARNING) {
+            got_warning = 1;
+            break;
+        } else if (rc == 1 || rc == OM_ERR_BUS_GAP_DETECTED) {
+            got_records++;
+        } else if (rc == OM_ERR_BUS_TCP_DISCONNECTED) {
+            break;
+        } else if (rc == 0) {
+            usleep(5000);
+        }
+    }
+
+    ck_assert_int_gt(got_records, 0);
+    ck_assert_int_eq(got_warning, 1);
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
+/* ---- Test: R4 — SHM reorder detection ---- */
+START_TEST(test_bus_reorder_detection) {
+    const char *name = test_shm_name("reorder");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 1, .flags = OM_BUS_FLAG_REJECT_REORDER,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    /* Publish seq 1, 5, 3 — the third should trigger reorder */
+    uint32_t payload = 42;
+    om_bus_stream_publish(stream, 1, 1, &payload, sizeof(payload));
+    om_bus_stream_publish(stream, 5, 1, &payload, sizeof(payload));
+    om_bus_stream_publish(stream, 3, 1, &payload, sizeof(payload));
+
+    OmBusRecord rec;
+    /* seq 1: first record, no gap */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+
+    /* seq 5: gap detected (expected 2) */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), OM_ERR_BUS_GAP_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 5);
+
+    /* seq 3: reorder detected (expected 6, got 3) */
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), OM_ERR_BUS_REORDER_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 3);
+
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+/* ---- Test: R4 — TCP reorder detection ---- */
+START_TEST(test_tcp_reorder_detection) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+
+    /* Client with REJECT_REORDER flag */
+    OmBusTcpClientConfig ccfg = {
+        .host = "127.0.0.1",
+        .port = port,
+        .recv_buf_size = 0,
+        .flags = OM_BUS_FLAG_REJECT_REORDER,
+    };
+    OmBusTcpClient *client = NULL;
+    ck_assert_int_eq(om_bus_tcp_client_connect(&client, &ccfg), 0);
+    om_bus_tcp_server_poll_io(srv);
+
+    /* Broadcast seq 1, 5, 3 */
+    uint32_t payload = 42;
+    om_bus_tcp_server_broadcast(srv, 1, 1, &payload, sizeof(payload));
+    om_bus_tcp_server_broadcast(srv, 5, 1, &payload, sizeof(payload));
+    om_bus_tcp_server_broadcast(srv, 3, 1, &payload, sizeof(payload));
+    om_bus_tcp_server_poll_io(srv);
+    usleep(5000);
+
+    OmBusRecord rec;
+    /* seq 1: ok */
+    ck_assert_int_eq(om_bus_tcp_client_poll(client, &rec), 1);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+
+    /* seq 5: gap */
+    ck_assert_int_eq(om_bus_tcp_client_poll(client, &rec), OM_ERR_BUS_GAP_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 5);
+
+    /* seq 3: reorder */
+    ck_assert_int_eq(om_bus_tcp_client_poll(client, &rec), OM_ERR_BUS_REORDER_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 3);
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
 /* ============================================================================
  * Suite
  * ============================================================================ */
@@ -1566,6 +1697,7 @@ Suite *bus_suite(void) {
     tcase_add_test(tc, test_bus_epoch_restart);
     tcase_add_test(tc, test_bus_stale_consumer);
     tcase_add_test(tc, test_bus_relay);
+    tcase_add_test(tc, test_bus_reorder_detection);
     suite_add_tcase(s, tc);
 
     TCase *tc_wal = tcase_create("WAL-Bus");
@@ -1591,6 +1723,8 @@ Suite *bus_suite(void) {
     tcase_add_test(tc_tcp, test_tcp_server_stats);
     tcase_add_test(tc_tcp, test_tcp_slow_client_stats);
     tcase_add_test(tc_tcp, test_tcp_auto_reconnect);
+    tcase_add_test(tc_tcp, test_tcp_slow_client_warning);
+    tcase_add_test(tc_tcp, test_tcp_reorder_detection);
     suite_add_tcase(s, tc_tcp);
 
     return s;

@@ -25,6 +25,7 @@
 
 #define OM_BUS_TCP_FRAME_MAGIC       0x4F4D5446U  /* "OMTF" */
 #define OM_BUS_TCP_FRAME_HEADER_SIZE 16U
+#define OM_BUS_TCP_WAL_TYPE_SLOW_WARNING 0xFEU  /* Reserved: slow client warning */
 
 typedef struct OmBusTcpFrameHeader {
     uint32_t magic;        /* OM_BUS_TCP_FRAME_MAGIC */
@@ -116,6 +117,7 @@ typedef struct OmBusTcpClientConfig {
     const char *host;           /* e.g., "127.0.0.1" */
     uint16_t    port;
     uint32_t    recv_buf_size;  /* default 256 KB */
+    uint32_t    flags;          /* OM_BUS_FLAG_REJECT_REORDER, etc. */
 } OmBusTcpClientConfig;
 
 typedef struct OmBusTcpClient OmBusTcpClient;

@@ -32,7 +32,8 @@
 #define OM_BUS_DEFAULT_CAPACITY     4096U
 #define OM_BUS_DEFAULT_MAX_CONSUMERS 8U
 
-#define OM_BUS_FLAG_CRC        0x1U  /* Enable CRC32 on publish/poll */
+#define OM_BUS_FLAG_CRC              0x1U  /* Enable CRC32 on publish/poll */
+#define OM_BUS_FLAG_REJECT_REORDER   0x2U  /* Return error on wal_seq < expected */
 
 /* ============================================================================
  * Slot Header (24 bytes) — sits at the start of each ring slot
