@@ -167,7 +167,7 @@ int main(int argc, char **argv) {
     /* Seed RNG */
     if (!seed_set) {
         struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
+        clock_gettime(CLOCK_REALTIME, &ts);
         seed = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 32);
     }
     rng_state = seed ? seed : 1;
