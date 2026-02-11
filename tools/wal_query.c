@@ -8,6 +8,7 @@
 SQLITE_EXTENSION_INIT1
 
 #include "openmatch/om_wal.h"
+#include "openmatch/om_error.h"
 
 typedef struct WalQueryVtab {
     sqlite3_vtab base;
@@ -30,6 +31,10 @@ typedef struct WalQueryCursor {
     OmWalDeactivate deactivate;
     OmWalActivate activate;
     uint64_t user_type;
+    uint32_t stored_crc;
+    uint32_t computed_crc;
+    bool crc_ok;
+    uint64_t file_offset;
 } WalQueryCursor;
 
 enum WalQueryColumn {
@@ -50,7 +55,11 @@ enum WalQueryColumn {
     WAL_COL_TAKER_ID,
     WAL_COL_MATCH_PRICE,
     WAL_COL_MATCH_VOLUME,
-    WAL_COL_USER_TYPE
+    WAL_COL_USER_TYPE,
+    WAL_COL_STORED_CRC,
+    WAL_COL_COMPUTED_CRC,
+    WAL_COL_CRC_OK,
+    WAL_COL_FILE_OFFSET
 };
 
 static const char *wal_type_name(OmWalType type) {
@@ -83,7 +92,7 @@ static int wal_query_connect(sqlite3 *db, void *pAux, int argc, const char *cons
     uint32_t file_index = 0;
     size_t user_data_size = 0;
     size_t aux_data_size = 0;
-    bool enable_crc32 = false;
+    bool disable_crc32 = false;
 
     for (int i = 3; i < argc; i++) {
         const char *arg = argv[i];
@@ -105,7 +114,7 @@ static int wal_query_connect(sqlite3 *db, void *pAux, int argc, const char *cons
             } else if (key_len == 8 && strncasecmp(arg, "aux_data", 8) == 0) {
                 aux_data_size = (size_t)strtoull(val, NULL, 10);
             } else if (key_len == 5 && strncasecmp(arg, "crc32", 5) == 0) {
-                enable_crc32 = (strtoul(val, NULL, 10) != 0);
+                disable_crc32 = (strtoul(val, NULL, 10) == 0);
             }
         } else if (!filename) {
             filename = arg;
@@ -130,7 +139,7 @@ static int wal_query_connect(sqlite3 *db, void *pAux, int argc, const char *cons
     vtab->config.file_index = file_index;
     vtab->config.user_data_size = user_data_size;
     vtab->config.aux_data_size = aux_data_size;
-    vtab->config.disable_crc32 = !enable_crc32;
+    vtab->config.disable_crc32 = disable_crc32;
     vtab->config.buffer_size = 0;
     vtab->config.sync_interval_ms = 0;
     vtab->config.use_direct_io = false;
@@ -155,7 +164,11 @@ static int wal_query_connect(sqlite3 *db, void *pAux, int argc, const char *cons
                                  "taker_id INTEGER,"
                                  "match_price INTEGER,"
                                  "match_volume INTEGER,"
-                                 "user_type INTEGER"
+                                 "user_type INTEGER,"
+                                 "stored_crc INTEGER,"
+                                 "computed_crc INTEGER,"
+                                 "crc_ok INTEGER,"
+                                 "file_offset INTEGER"
                                  ")");
     if (rc != SQLITE_OK) {
         wal_query_disconnect(&vtab->base);
@@ -209,12 +222,23 @@ static int wal_query_next(sqlite3_vtab_cursor *cur) {
     size_t data_len = 0;
 
     int ret = om_wal_replay_next(&cursor->replay, &type, &data, &sequence, &data_len);
-    if (ret == 1) {
+    if (ret == 1 || ret == OM_ERR_WAL_CRC_MISMATCH) {
         cursor->type = type;
         cursor->sequence = sequence;
         cursor->data_len = data_len;
         cursor->user_type = 0;
         cursor->eof = false;
+        cursor->file_offset = cursor->replay.last_record_offset;
+
+        if (ret == OM_ERR_WAL_CRC_MISMATCH) {
+            cursor->stored_crc = cursor->replay.last_stored_crc;
+            cursor->computed_crc = cursor->replay.last_computed_crc;
+            cursor->crc_ok = false;
+        } else {
+            cursor->stored_crc = cursor->replay.last_computed_crc;
+            cursor->computed_crc = cursor->replay.last_computed_crc;
+            cursor->crc_ok = true;
+        }
 
         memset(&cursor->insert, 0, sizeof(cursor->insert));
         memset(&cursor->cancel, 0, sizeof(cursor->cancel));
@@ -436,6 +460,18 @@ static int wal_query_column(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int 
             } else {
                 sqlite3_result_null(ctx);
             }
+            break;
+        case WAL_COL_STORED_CRC:
+            sqlite3_result_int64(ctx, (sqlite3_int64)cursor->stored_crc);
+            break;
+        case WAL_COL_COMPUTED_CRC:
+            sqlite3_result_int64(ctx, (sqlite3_int64)cursor->computed_crc);
+            break;
+        case WAL_COL_CRC_OK:
+            sqlite3_result_int(ctx, cursor->crc_ok ? 1 : 0);
+            break;
+        case WAL_COL_FILE_OFFSET:
+            sqlite3_result_int64(ctx, (sqlite3_int64)cursor->file_offset);
             break;
         default:
             sqlite3_result_null(ctx);

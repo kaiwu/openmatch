@@ -474,6 +474,7 @@ Record mix: ~50% INSERT, ~15% CANCEL, ~15% MATCH, ~10% DEACTIVATE, ~10% ACTIVATE
 ### wal_query (SQLite extension)
 
 Builds a loadable SQLite extension that exposes WAL records as a virtual table.
+CRC32 is validated by default — corrupted records are included with `crc_ok=0`.
 
 ```
 cmake -S . -B build
@@ -482,43 +483,73 @@ cmake --build build
 
 Load in sqlite3:
 
-```
+```sql
 .load ./build/tools/wal_query
 CREATE VIRTUAL TABLE walv USING wal_query(
   file=/tmp/openmatch.wal,
   user_data=64,
-  aux_data=128,
-  crc32=1
+  aux_data=128
 );
 SELECT seq, type_name, order_id, price, volume, product_id, timestamp_ns FROM walv;
 ```
 
-Virtual table schema:
+Virtual table options:
+
+| Option | Description |
+|--------|-------------|
+| `file=PATH` | WAL file path (required unless `pattern` is used) |
+| `pattern=FMT` | Multi-file pattern, e.g. `/tmp/wal_%06u.wal` |
+| `index=N` | Starting file index for multi-file (default 0) |
+| `user_data=N` | User data size in bytes (default 0) |
+| `aux_data=N` | Aux data size in bytes (default 0) |
+| `crc32=0` | Disable CRC validation (for legacy CRC-free WALs) |
+
+Virtual table columns:
 
 ```
-seq INTEGER
-type INTEGER
-type_name TEXT
-data_len INTEGER
-order_id INTEGER
-price INTEGER
-volume INTEGER
-vol_remain INTEGER
-org INTEGER
-flags INTEGER
-product_id INTEGER
-timestamp_ns INTEGER
-slot_idx INTEGER
-maker_id INTEGER
-taker_id INTEGER
-match_price INTEGER
-match_volume INTEGER
-user_type INTEGER
+seq INTEGER          -- WAL sequence number
+type INTEGER         -- Record type enum
+type_name TEXT       -- INSERT, CANCEL, MATCH, DEACTIVATE, ACTIVATE, USER
+data_len INTEGER     -- Payload length in bytes
+order_id INTEGER     -- Order ID (INSERT, CANCEL, DEACTIVATE, ACTIVATE)
+price INTEGER        -- Price (INSERT, MATCH)
+volume INTEGER       -- Volume (INSERT)
+vol_remain INTEGER   -- Volume remaining (INSERT)
+org INTEGER          -- Organization ID (INSERT)
+flags INTEGER        -- Flags (INSERT)
+product_id INTEGER   -- Product ID (all types)
+timestamp_ns INTEGER -- Timestamp in nanoseconds (all types)
+slot_idx INTEGER     -- Slab slot index (CANCEL, DEACTIVATE, ACTIVATE)
+maker_id INTEGER     -- Maker order ID (MATCH)
+taker_id INTEGER     -- Taker order ID (MATCH)
+match_price INTEGER  -- Deal price (MATCH)
+match_volume INTEGER -- Deal volume (MATCH)
+user_type INTEGER    -- Custom record type (USER)
+stored_crc INTEGER   -- CRC32 value read from disk
+computed_crc INTEGER -- CRC32 value computed over header+payload
+crc_ok INTEGER       -- 1 if CRC matches, 0 if corrupted
+file_offset INTEGER  -- Byte offset of record header in WAL file
 ```
 
-Multi-file WAL (pattern + index):
+#### CRC integrity queries
 
+```sql
+-- Find all corrupted records
+SELECT seq, type_name, printf('0x%08x', stored_crc) AS bad_crc,
+       printf('0x%08x', computed_crc) AS good_crc, file_offset
+FROM walv WHERE crc_ok = 0;
+
+-- Count good vs bad records
+SELECT crc_ok, count(*) FROM walv GROUP BY crc_ok;
+
+-- Analyze only valid records
+SELECT type_name, count(*), sum(volume) FROM walv
+WHERE crc_ok = 1 GROUP BY type_name;
 ```
+
+#### Multi-file WAL
+
+```sql
 CREATE VIRTUAL TABLE walv USING wal_query(
   pattern=/tmp/openmatch_%06u.wal,
   index=0,
@@ -527,7 +558,7 @@ CREATE VIRTUAL TABLE walv USING wal_query(
 );
 ```
 
-Optional indexes (load in sqlite3):
+#### Optional indexes
 
 ```
 .read ./tools/wal_query.sql
