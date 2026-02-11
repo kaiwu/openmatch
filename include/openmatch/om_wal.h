@@ -236,6 +236,11 @@ typedef struct OmWalReplay {
     size_t aux_data_size;
     bool enable_crc32;          /* Whether to validate CRC32 on replay */
 
+    /* CRC mismatch details — populated when replay_next returns OM_ERR_WAL_CRC_MISMATCH */
+    uint32_t last_stored_crc;   /* CRC read from file (bad value) */
+    uint32_t last_computed_crc; /* CRC computed over header+payload (good value) */
+    uint64_t last_record_offset; /* File byte offset of the bad record header */
+
     void *user_ctx;             /* User-defined context for custom records */
     int (*user_handler)(OmWalType type, const void *data, size_t len, void *user_ctx);
 } OmWalReplay;

@@ -6,6 +6,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "openmatch/om_wal.h"
+#include "openmatch/om_error.h"
 #include "ombus/om_bus.h"
 
 #define MAX_RANGES 32
@@ -243,6 +244,7 @@ static void usage(const char *prog) {
         "\n"
         "options:\n"
         "  -t                Format timestamps as human-readable\n"
+        "  -c                Validate CRC32 (stop on corruption)\n"
         "  -s from-to        Sequence range filter (inclusive, repeatable)\n"
         "  -r from-to        Time range filter (inclusive, repeatable)\n"
         "                    Format: YYYYMMDDHHMMSS-YYYYMMDDHHMMSS\n"
@@ -261,6 +263,7 @@ static void usage(const char *prog) {
 
 int main(int argc, char **argv) {
     bool format_ts = false;
+    bool check_crc = false;
     const char *stream_name = NULL;
 
     SeqRange seq_ranges[MAX_RANGES];
@@ -269,10 +272,13 @@ int main(int argc, char **argv) {
     int n_time = 0;
 
     int opt;
-    while ((opt = getopt(argc, argv, "ts:r:p:")) != -1) {
+    while ((opt = getopt(argc, argv, "tcs:r:p:")) != -1) {
         switch (opt) {
             case 't':
                 format_ts = true;
+                break;
+            case 'c':
+                check_crc = true;
                 break;
             case 's':
                 if (n_seq >= MAX_RANGES) {
@@ -345,7 +351,17 @@ int main(int argc, char **argv) {
         const char *wal_path = argv[optind + fi];
 
         OmWalReplay replay;
-        if (om_wal_replay_init(&replay, wal_path) != 0) {
+        int init_rc;
+        if (check_crc) {
+            OmWalConfig wal_cfg = {
+                .filename = wal_path,
+                .enable_crc32 = true,
+            };
+            init_rc = om_wal_replay_init_with_config(&replay, wal_path, &wal_cfg);
+        } else {
+            init_rc = om_wal_replay_init(&replay, wal_path);
+        }
+        if (init_rc != 0) {
             fprintf(stderr, "failed to open wal: %s\n", wal_path);
             exit_code = 1;
             continue;
@@ -356,8 +372,31 @@ int main(int argc, char **argv) {
             if (ret == 0) {
                 break;
             }
+            if (ret == OM_ERR_WAL_CRC_MISMATCH) {
+                fprintf(stderr,
+                    "CRC MISMATCH in %s at seq %" PRIu64 "\n"
+                    "  file offset:  %" PRIu64 " (0x%" PRIx64 ")\n"
+                    "  stored CRC:   0x%08" PRIx32 " (bad)\n"
+                    "  computed CRC: 0x%08" PRIx32 " (good)\n"
+                    "  record type:  %s  len: %zu\n"
+                    "\n"
+                    "To repair, patch 4 bytes at offset %" PRIu64 " + 8 + %zu = %" PRIu64
+                    " (0x%" PRIx64 ") with the good CRC value.\n",
+                    wal_path, sequence,
+                    replay.last_record_offset, replay.last_record_offset,
+                    replay.last_stored_crc,
+                    replay.last_computed_crc,
+                    wal_type_name(type), data_len,
+                    replay.last_record_offset,
+                    data_len,
+                    replay.last_record_offset + 8 + data_len,
+                    replay.last_record_offset + 8 + data_len);
+                exit_code = 1;
+                break;
+            }
             if (ret < 0) {
                 fprintf(stderr, "error reading wal %s (ret=%d)\n", wal_path, ret);
+                exit_code = 1;
                 break;
             }
 
@@ -372,30 +411,41 @@ int main(int argc, char **argv) {
             fprintf(out, "seq[%" PRIu64 "] type[%s] len[%zu] ",
                     sequence, wal_type_name(type), data_len);
 
+            /* memcpy to local to avoid unaligned access (UBSan) */
             switch (type) {
                 case OM_WAL_INSERT:
                     if (data_len >= sizeof(OmWalInsert)) {
-                        print_insert(out, (const OmWalInsert *)data, format_ts);
+                        OmWalInsert rec_i;
+                        memcpy(&rec_i, data, sizeof(rec_i));
+                        print_insert(out, &rec_i, format_ts);
                     }
                     break;
                 case OM_WAL_CANCEL:
                     if (data_len == sizeof(OmWalCancel)) {
-                        print_cancel(out, (const OmWalCancel *)data, format_ts);
+                        OmWalCancel rec_c;
+                        memcpy(&rec_c, data, sizeof(rec_c));
+                        print_cancel(out, &rec_c, format_ts);
                     }
                     break;
                 case OM_WAL_MATCH:
                     if (data_len == sizeof(OmWalMatch)) {
-                        print_match(out, (const OmWalMatch *)data, format_ts);
+                        OmWalMatch rec_m;
+                        memcpy(&rec_m, data, sizeof(rec_m));
+                        print_match(out, &rec_m, format_ts);
                     }
                     break;
                 case OM_WAL_DEACTIVATE:
                     if (data_len == sizeof(OmWalDeactivate)) {
-                        print_deactivate(out, (const OmWalDeactivate *)data, format_ts);
+                        OmWalDeactivate rec_d;
+                        memcpy(&rec_d, data, sizeof(rec_d));
+                        print_deactivate(out, &rec_d, format_ts);
                     }
                     break;
                 case OM_WAL_ACTIVATE:
                     if (data_len == sizeof(OmWalActivate)) {
-                        print_activate(out, (const OmWalActivate *)data, format_ts);
+                        OmWalActivate rec_a;
+                        memcpy(&rec_a, data, sizeof(rec_a));
+                        print_activate(out, &rec_a, format_ts);
                     }
                     break;
                 default:

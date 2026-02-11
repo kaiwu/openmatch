@@ -11,6 +11,18 @@ target_link_libraries(wal_reader
         ombus
 )
 
+add_executable(wal_maker wal_maker.c)
+
+target_include_directories(wal_maker
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+)
+
+target_link_libraries(wal_maker
+    PRIVATE
+        openmatch
+)
+
 find_package(SQLite3)
 if(SQLite3_FOUND)
     add_library(wal_query MODULE wal_query.c)

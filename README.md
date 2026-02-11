@@ -85,7 +85,8 @@ transports: shared memory (same host) and TCP (cross-machine).
 │   └── om_bus_tcp.c          # TCP bus transport (server + client)
 ├── tests/                    # check-based unit tests
 ├── tools/                    # Utility binaries + awk helpers
-│   ├── wal_reader.c           # WAL dump with filters (-s/-r) and SHM replay (-p)
+│   ├── wal_reader.c           # WAL dump with filters (-s/-r), CRC (-c), SHM replay (-p)
+│   ├── wal_maker.c            # Generate random WAL files for testing (-e for corruption)
 │   ├── wal_trace_oid.awk
 │   ├── wal_match_by_maker.awk
 │   └── wal_sum_qty_by_maker.awk
@@ -338,6 +339,7 @@ wal_reader [options] <wal_file> [wal_file ...]
 
 options:
   -t                Format timestamps as human-readable
+  -c                Validate CRC32 (stop on corruption)
   -s from-to        Sequence range filter (inclusive, repeatable)
   -r from-to        Time range filter (inclusive, repeatable)
                     Format: YYYYMMDDHHMMSS-YYYYMMDDHHMMSS
@@ -411,6 +413,50 @@ List all activates/deactivates:
 ```
 ./build/tools/wal_reader /tmp/openmatch.wal \
   | awk -F'[][]' '{for (i=2;i<=NF;i+=2) if ($i=="type" && ($(i+1)=="DEACTIVATE" || $(i+1)=="ACTIVATE")) print $0}'
+```
+
+#### CRC validation
+
+Use `-c` for WAL files written with CRC32 enabled. On corruption, the reader
+stops and reports stored vs computed CRC and the exact file offset for repair:
+
+```
+$ wal_reader -c /tmp/broken.wal
+CRC MISMATCH in /tmp/broken.wal at seq 33
+  file offset:  1784 (0x6f8)
+  stored CRC:   0x5ce0680f (bad)
+  computed CRC: 0x24b1cac5 (good)
+  record type:  INSERT  len: 56
+
+To repair, patch 4 bytes at offset 1784 + 8 + 56 = 1848 (0x738) with the good CRC value.
+```
+
+### wal_maker
+
+Generates WAL files with random records for testing.
+
+```
+wal_maker [options] <output_wal>
+
+options:
+  -n count      Number of records (default 100)
+  -e count      Number of records to corrupt (default 0)
+  -c            Enable CRC32 (required for -e to be useful)
+  -p products   Number of product IDs (default 4)
+  -S seed       RNG seed (default: from clock)
+```
+
+Record mix: ~50% INSERT, ~15% CANCEL, ~15% MATCH, ~10% DEACTIVATE, ~10% ACTIVATE.
+
+```bash
+# Generate a clean 1000-record CRC-enabled WAL
+./build/tools/wal_maker -n 1000 -c /tmp/test.wal
+
+# Generate a WAL with 3 corrupted records (for testing CRC validation)
+./build/tools/wal_maker -n 500 -c -e 3 /tmp/broken.wal
+
+# Verify the broken file
+./build/tools/wal_reader -c /tmp/broken.wal
 ```
 
 ### wal_query (SQLite extension)

@@ -741,6 +741,10 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
 
         char *record_start = (char *)replay->buffer + replay->buffer_pos;
 
+        /* Track file offset of this record for CRC error reporting */
+        replay->last_record_offset = replay->file_offset
+            - replay->buffer_valid + replay->buffer_pos;
+
         /* Use memcpy to avoid unaligned access (UBSan) */
         OmWalHeader header_local;
         memcpy(&header_local, record_start, sizeof(OmWalHeader));
@@ -790,16 +794,19 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
             record_start = (char *)replay->buffer + replay->buffer_pos - sizeof(OmWalHeader);
         }
 
+        *data = (char *)replay->buffer + replay->buffer_pos;
+
         if (replay->enable_crc32) {
             uint32_t stored_crc;
             memcpy(&stored_crc, (char *)replay->buffer + replay->buffer_pos + *data_len, WAL_CRC32_SIZE);
             uint32_t computed_crc = crc32_compute(record_start, sizeof(OmWalHeader) + *data_len);
+            replay->last_stored_crc = stored_crc;
+            replay->last_computed_crc = computed_crc;
             if (stored_crc != computed_crc) {
                 return OM_ERR_WAL_CRC_MISMATCH;
             }
         }
 
-        *data = (char *)replay->buffer + replay->buffer_pos;
         replay->buffer_pos += *data_len + crc_size;
         replay->last_sequence = *sequence;
 
@@ -817,16 +824,19 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
             record_start = (char *)replay->buffer + replay->buffer_pos - sizeof(OmWalHeader);
         }
 
+        *data = (char *)replay->buffer + replay->buffer_pos;
+
         if (replay->enable_crc32) {
             uint32_t stored_crc;
             memcpy(&stored_crc, (char *)replay->buffer + replay->buffer_pos + *data_len, WAL_CRC32_SIZE);
             uint32_t computed_crc = crc32_compute(record_start, sizeof(OmWalHeader) + *data_len);
+            replay->last_stored_crc = stored_crc;
+            replay->last_computed_crc = computed_crc;
             if (stored_crc != computed_crc) {
                 return OM_ERR_WAL_CRC_MISMATCH;
             }
         }
 
-        *data = (char *)replay->buffer + replay->buffer_pos;
         replay->buffer_pos += *data_len + crc_size;
         replay->last_sequence = *sequence;
 

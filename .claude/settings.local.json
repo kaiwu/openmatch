@@ -19,7 +19,8 @@
       "Bash(LD_PRELOAD=/usr/lib/libasan.so /tmp/test_warn:*)",
       "Bash(./tools/wal_reader:*)",
       "Bash(LD_PRELOAD=/usr/lib/libasan.so ./tools/wal_reader:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(LD_PRELOAD=/usr/lib/libasan.so ./tools/wal_maker:*)"
     ]
   }
 }
