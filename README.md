@@ -453,7 +453,7 @@ wal_maker [options] <output_wal>
 options:
   -n count      Number of records (default 100)
   -e count      Number of records to corrupt (default 0)
-  -c            Enable CRC32 (required for -e to be useful)
+  -C            Disable CRC32 (CRC is on by default)
   -p products   Number of product IDs (default 4)
   -S seed       RNG seed (default: from clock)
 ```
@@ -461,13 +461,13 @@ options:
 Record mix: ~50% INSERT, ~15% CANCEL, ~15% MATCH, ~10% DEACTIVATE, ~10% ACTIVATE.
 
 ```bash
-# Generate a clean 1000-record CRC-enabled WAL
-./build/tools/wal_maker -n 1000 -c /tmp/test.wal
+# Generate a clean 1000-record WAL (CRC on by default)
+./build/tools/wal_maker -n 1000 /tmp/test.wal
 
 # Generate a WAL with 3 corrupted records (for testing CRC validation)
-./build/tools/wal_maker -n 500 -c -e 3 /tmp/broken.wal
+./build/tools/wal_maker -n 500 -e 3 /tmp/broken.wal
 
-# Verify the broken file
+# Verify the broken file (strict mode: stop on first error)
 ./build/tools/wal_reader -c /tmp/broken.wal
 ```
 

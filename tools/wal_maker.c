@@ -34,7 +34,7 @@ static void usage(const char *prog) {
         "options:\n"
         "  -n count      Number of records to generate (default 100)\n"
         "  -e count      Number of records to corrupt after writing (default 0)\n"
-        "  -c            Enable CRC32 (required for -e to be useful)\n"
+        "  -C            Disable CRC32 (CRC is on by default)\n"
         "  -p products   Number of product IDs 0..N-1 (default 4)\n"
         "  -S seed       RNG seed (default: from clock)\n"
         "\n"
@@ -42,8 +42,8 @@ static void usage(const char *prog) {
         "            ~10%% DEACTIVATE, ~10%% ACTIVATE\n"
         "\n"
         "examples:\n"
-        "  %s -n 1000 -c /tmp/test.wal\n"
-        "  %s -n 500 -c -e 3 /tmp/broken.wal\n",
+        "  %s -n 1000 /tmp/test.wal\n"
+        "  %s -n 500 -e 3 /tmp/broken.wal\n",
         prog, prog, prog);
 }
 
@@ -111,14 +111,14 @@ static int corrupt_records(const char *path, int count, int total_records) {
 int main(int argc, char **argv) {
     int n_records = 100;
     int n_corrupt = 0;
-    bool enable_crc = false;
+    bool disable_crc = false;
     int n_products = 4;
     uint64_t seed = 0;
     bool seed_set = false;
     const char *output = NULL;
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:e:cp:S:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:e:Cp:S:")) != -1) {
         switch (opt) {
             case 'n':
                 n_records = atoi(optarg);
@@ -134,8 +134,8 @@ int main(int argc, char **argv) {
                     return 2;
                 }
                 break;
-            case 'c':
-                enable_crc = true;
+            case 'C':
+                disable_crc = true;
                 break;
             case 'p':
                 n_products = atoi(optarg);
@@ -160,8 +160,8 @@ int main(int argc, char **argv) {
     }
     output = argv[optind];
 
-    if (n_corrupt > 0 && !enable_crc) {
-        fprintf(stderr, "warning: -e without -c has no effect (no CRC to break)\n");
+    if (n_corrupt > 0 && disable_crc) {
+        fprintf(stderr, "warning: -e with -C has no effect (no CRC to break)\n");
     }
 
     /* Seed RNG */
@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
         .filename = output,
         .buffer_size = 1024 * 1024,
         .use_direct_io = false,
-        .disable_crc32 = !enable_crc,
+        .disable_crc32 = disable_crc,
     };
 
     OmWal wal;
@@ -293,7 +293,7 @@ int main(int argc, char **argv) {
             counts[0] + counts[1] + counts[2] + counts[3] + counts[4]);
 
     /* Corrupt if requested */
-    if (n_corrupt > 0 && enable_crc) {
+    if (n_corrupt > 0 && !disable_crc) {
         int total = counts[0] + counts[1] + counts[2] + counts[3] + counts[4];
         corrupt_records(output, n_corrupt, total);
     }
