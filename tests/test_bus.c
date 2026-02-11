@@ -1978,6 +1978,80 @@ START_TEST(test_tcp_server_load) {
 }
 END_TEST
 
+START_TEST(test_bus_mixed_poll_batch_sequence_tracking) {
+    const char *name = test_shm_name("mixseq");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 1, .flags = 0,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    uint32_t payload = 99;
+    for (uint64_t seq = 1; seq <= 6; seq++) {
+        ck_assert_int_eq(om_bus_stream_publish(stream, seq, 1, &payload, sizeof(payload)), 0);
+    }
+
+    OmBusRecord rec;
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+
+    OmBusRecord recs[3];
+    int count = om_bus_endpoint_poll_batch(ep, recs, 3);
+    ck_assert_int_eq(count, 3);
+    ck_assert_uint_eq(recs[0].wal_seq, 2);
+    ck_assert_uint_eq(recs[1].wal_seq, 3);
+    ck_assert_uint_eq(recs[2].wal_seq, 4);
+
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), 1);
+    ck_assert_uint_eq(rec.wal_seq, 5);
+
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
+START_TEST(test_bus_batch_then_poll_reorder_detection) {
+    const char *name = test_shm_name("batchreorder");
+    OmBusStream *stream = NULL;
+    OmBusStreamConfig scfg = {
+        .stream_name = name, .capacity = 64, .slot_size = 256,
+        .max_consumers = 1, .flags = OM_BUS_FLAG_REJECT_REORDER,
+    };
+    ck_assert_int_eq(om_bus_stream_create(&stream, &scfg), 0);
+
+    OmBusEndpoint *ep = NULL;
+    OmBusEndpointConfig ecfg = {
+        .stream_name = name, .consumer_index = 0, .zero_copy = false,
+    };
+    ck_assert_int_eq(om_bus_endpoint_open(&ep, &ecfg), 0);
+
+    uint32_t payload = 7;
+    ck_assert_int_eq(om_bus_stream_publish(stream, 1, 1, &payload, sizeof(payload)), 0);
+    ck_assert_int_eq(om_bus_stream_publish(stream, 2, 1, &payload, sizeof(payload)), 0);
+    ck_assert_int_eq(om_bus_stream_publish(stream, 1, 1, &payload, sizeof(payload)), 0);
+
+    OmBusRecord recs[2];
+    int count = om_bus_endpoint_poll_batch(ep, recs, 2);
+    ck_assert_int_eq(count, 2);
+    ck_assert_uint_eq(recs[0].wal_seq, 1);
+    ck_assert_uint_eq(recs[1].wal_seq, 2);
+
+    OmBusRecord rec;
+    ck_assert_int_eq(om_bus_endpoint_poll(ep, &rec), OM_ERR_BUS_REORDER_DETECTED);
+    ck_assert_uint_eq(rec.wal_seq, 1);
+
+    om_bus_endpoint_close(ep);
+    om_bus_stream_destroy(stream);
+}
+END_TEST
+
 /* ---- Test: SHM ring wrap-around with high head values ---- */
 START_TEST(test_bus_ring_wrap) {
     const char *name = test_shm_name("wrap");
@@ -2038,6 +2112,8 @@ Suite *bus_suite(void) {
     tcase_add_test(tc, test_bus_batch_poll_crc);
     tcase_add_test(tc, test_bus_multiple_gaps);
     tcase_add_test(tc, test_bus_concurrent_consumers);
+    tcase_add_test(tc, test_bus_mixed_poll_batch_sequence_tracking);
+    tcase_add_test(tc, test_bus_batch_then_poll_reorder_detection);
     tcase_add_test(tc, test_bus_ring_wrap);
     suite_add_tcase(s, tc);
 

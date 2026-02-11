@@ -650,6 +650,7 @@ int om_bus_endpoint_poll_batch(OmBusEndpoint *ep, OmBusRecord *recs,
     if (count > 0) {
         uint64_t prev_tail = tail;
         uint64_t new_tail = tail + count;
+        ep->expected_wal_seq = recs[count - 1].wal_seq + 1U;
         atomic_store_explicit(&ep->tails[ep->consumer_index].tail,
                               new_tail, memory_order_release);
         atomic_store_explicit(&ep->tails[ep->consumer_index].wal_seq,
