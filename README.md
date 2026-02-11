@@ -97,32 +97,41 @@ transports: shared memory (same host) and TCP (cross-machine).
 
 ```bash
 git clone --recursive <repo>
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc)
+cmake -S . -B build
+cmake --build build -j$(nproc)
+```
+
+### Release Build (recommended for perf runs)
+
+Use a separate `build_release/` directory so debug/sanitizer and release
+artifacts do not mix:
+
+```bash
+cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release -DENABLE_ASAN=OFF -DENABLE_UBSAN=OFF
+cmake --build build_release -j$(nproc)
 ```
 
 ### Sanitizers (default on)
 
 ```bash
-cmake -DENABLE_ASAN=OFF -DENABLE_UBSAN=OFF ..
-make -j$(nproc)
+cmake -S . -B build -DENABLE_ASAN=ON -DENABLE_UBSAN=ON
+cmake --build build -j$(nproc)
 ```
 
 ## Tests
 
-All tests run from `build/`.
+All tests run from a chosen build directory (for example `build/` or
+`build_release/`).
 
 ```bash
-cd build
-ctest --output-on-failure
+ctest --test-dir build --output-on-failure
+ctest --test-dir build_release --output-on-failure
 ```
 
 If ASan complains about preload order, run:
 
 ```bash
-cd build
-LD_PRELOAD=/usr/lib/libasan.so make test
+ASAN_OPTIONS=verify_asan_link_order=0 ctest --test-dir build --output-on-failure
 ```
 
 ## Core Concepts
