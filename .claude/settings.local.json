@@ -16,7 +16,10 @@
       "Bash(./tests/test_runner:*)",
       "Bash(cmake:*)",
       "Bash(find:*)",
-      "Bash(LD_PRELOAD=/usr/lib/libasan.so /tmp/test_warn:*)"
+      "Bash(LD_PRELOAD=/usr/lib/libasan.so /tmp/test_warn:*)",
+      "Bash(./tools/wal_reader:*)",
+      "Bash(LD_PRELOAD=/usr/lib/libasan.so ./tools/wal_reader:*)",
+      "Bash(echo:*)"
     ]
   }
 }

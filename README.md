@@ -85,7 +85,7 @@ transports: shared memory (same host) and TCP (cross-machine).
 │   └── om_bus_tcp.c          # TCP bus transport (server + client)
 ├── tests/                    # check-based unit tests
 ├── tools/                    # Utility binaries + awk helpers
-│   ├── wal_reader.c
+│   ├── wal_reader.c           # WAL dump with filters (-s/-r) and SHM replay (-p)
 │   ├── wal_trace_oid.awk
 │   ├── wal_match_by_maker.awk
 │   └── wal_sum_qty_by_maker.awk
@@ -330,16 +330,53 @@ om_wal_close(&wal);
 
 ### wal_reader
 
-Reads a WAL file and prints one record per line.
+Reads WAL files, prints records, and optionally replays them to an SHM bus.
+Accepts multiple files (shell glob works: `/tmp/wal_*.log`).
 
 ```
-./build/tools/wal_reader <wal_file>
+wal_reader [options] <wal_file> [wal_file ...]
+
+options:
+  -t                Format timestamps as human-readable
+  -s from-to        Sequence range filter (inclusive, repeatable)
+  -r from-to        Time range filter (inclusive, repeatable)
+                    Format: YYYYMMDDHHMMSS-YYYYMMDDHHMMSS
+  -p stream_name    Replay matching records to SHM bus stream
 ```
 
-Output format uses short bracketed fields (easy to parse):
+Output format uses short bracketed fields (easy to parse with AWK):
 
 ```
 seq[12] type[MATCH] len[40] m[100] t[200] p[10000] q[5] pid[0] ts[1700000000]
+```
+
+#### Filtering
+
+Multiple `-s` and `-r` filters form OR logic — a record is included if it
+falls within any specified range. Ranges are inclusive.
+
+```bash
+# Sequences 1-100 and 500-600
+./build/tools/wal_reader -s 1-100 -s 500-600 /tmp/openmatch.wal
+
+# Records between 12:00 and 13:00 on Jan 15 2025
+./build/tools/wal_reader -t -r 20250115120000-20250115130000 /tmp/openmatch.wal
+
+# Combine: sequences 1-50 OR anything in the time window
+./build/tools/wal_reader -s 1-50 -r 20250115120000-20250115130000 /tmp/openmatch.wal
+```
+
+#### Replay to SHM bus
+
+With `-p`, matching records are published to a named SHM bus stream for
+downstream consumers (market workers, relay, etc.). Output goes to stderr.
+
+```bash
+# Replay all records to /om-replay stream
+./build/tools/wal_reader -p /om-replay /tmp/openmatch.wal
+
+# Selective replay: only sequences 100-200
+./build/tools/wal_reader -s 100-200 -p /om-replay /tmp/openmatch.wal
 ```
 
 #### AWK examples

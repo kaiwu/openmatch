@@ -8,6 +8,7 @@ target_include_directories(wal_reader
 target_link_libraries(wal_reader
     PRIVATE
         openmatch
+        ombus
 )
 
 find_package(SQLite3)
