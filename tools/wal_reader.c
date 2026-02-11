@@ -244,7 +244,8 @@ static void usage(const char *prog) {
         "\n"
         "options:\n"
         "  -t                Format timestamps as human-readable\n"
-        "  -c                Validate CRC32 (stop on corruption)\n"
+        "  -c                Strict CRC: stop on first corruption\n"
+        "                    (without -c, CRC errors are warned but skipped)\n"
         "  -s from-to        Sequence range filter (inclusive, repeatable)\n"
         "  -r from-to        Time range filter (inclusive, repeatable)\n"
         "                    Format: YYYYMMDDHHMMSS-YYYYMMDDHHMMSS\n"
@@ -263,7 +264,7 @@ static void usage(const char *prog) {
 
 int main(int argc, char **argv) {
     bool format_ts = false;
-    bool check_crc = false;
+    bool strict_crc = false;
     const char *stream_name = NULL;
 
     SeqRange seq_ranges[MAX_RANGES];
@@ -278,7 +279,7 @@ int main(int argc, char **argv) {
                 format_ts = true;
                 break;
             case 'c':
-                check_crc = true;
+                strict_crc = true;
                 break;
             case 's':
                 if (n_seq >= MAX_RANGES) {
@@ -351,16 +352,7 @@ int main(int argc, char **argv) {
         const char *wal_path = argv[optind + fi];
 
         OmWalReplay replay;
-        int init_rc;
-        if (check_crc) {
-            OmWalConfig wal_cfg = {
-                .filename = wal_path,
-                .enable_crc32 = true,
-            };
-            init_rc = om_wal_replay_init_with_config(&replay, wal_path, &wal_cfg);
-        } else {
-            init_rc = om_wal_replay_init(&replay, wal_path);
-        }
+        int init_rc = om_wal_replay_init(&replay, wal_path);
         if (init_rc != 0) {
             fprintf(stderr, "failed to open wal: %s\n", wal_path);
             exit_code = 1;
@@ -392,7 +384,11 @@ int main(int argc, char **argv) {
                     replay.last_record_offset + 8 + data_len,
                     replay.last_record_offset + 8 + data_len);
                 exit_code = 1;
-                break;
+                if (strict_crc) {
+                    break;
+                }
+                /* Without -c, warn but continue reading */
+                continue;
             }
             if (ret < 0) {
                 fprintf(stderr, "error reading wal %s (ret=%d)\n", wal_path, ret);

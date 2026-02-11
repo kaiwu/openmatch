@@ -339,7 +339,8 @@ wal_reader [options] <wal_file> [wal_file ...]
 
 options:
   -t                Format timestamps as human-readable
-  -c                Validate CRC32 (stop on corruption)
+  -c                Strict CRC: stop on first corruption
+                    (without -c, CRC errors are warned but skipped)
   -s from-to        Sequence range filter (inclusive, repeatable)
   -r from-to        Time range filter (inclusive, repeatable)
                     Format: YYYYMMDDHHMMSS-YYYYMMDDHHMMSS
@@ -417,11 +418,22 @@ List all activates/deactivates:
 
 #### CRC validation
 
-Use `-c` for WAL files written with CRC32 enabled. On corruption, the reader
-stops and reports stored vs computed CRC and the exact file offset for repair:
+CRC32 is always validated. Corrupted records are warned on stderr and skipped.
+With `-c` (strict mode), the reader stops at the first CRC error:
+
+```bash
+# Default: warn and skip corrupted records, continue reading
+$ wal_reader /tmp/broken.wal
+# stderr: CRC MISMATCH warnings for each bad record
+# stdout: all good records (bad ones skipped)
+
+# Strict: stop at first corruption
+$ wal_reader -c /tmp/broken.wal
+```
+
+CRC mismatch output includes repair instructions:
 
 ```
-$ wal_reader -c /tmp/broken.wal
 CRC MISMATCH in /tmp/broken.wal at seq 33
   file offset:  1784 (0x6f8)
   stored CRC:   0x5ce0680f (bad)

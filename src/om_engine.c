@@ -46,7 +46,7 @@ int om_engine_init(OmEngine *engine, const OmEngineConfig *config)
             wal_cfg_local.buffer_size = perf->wal_buffer_size;
             wal_cfg_local.sync_interval_ms = perf->wal_sync_interval_ms;
             wal_cfg_local.use_direct_io = perf->wal_use_direct_io;
-            wal_cfg_local.enable_crc32 = perf->wal_enable_crc32;
+            wal_cfg_local.disable_crc32 = !perf->wal_enable_crc32;
             wal_cfg_local.user_data_size = slab_cfg.user_data_size;
             wal_cfg_local.aux_data_size = slab_cfg.aux_data_size;
             wal_cfg = &wal_cfg_local;

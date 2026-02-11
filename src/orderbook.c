@@ -775,7 +775,7 @@ int om_orderbook_recover_from_wal(OmOrderbookContext *ctx,
         .buffer_size = 0,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = ctx->wal ? ctx->wal->config.enable_crc32 : false,
+        .disable_crc32 = ctx->wal ? !ctx->wal->config.enable_crc32 : false,
         .user_data_size = ctx->slab.config.user_data_size,
         .aux_data_size = ctx->slab.config.aux_data_size
     };

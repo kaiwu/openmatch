@@ -20,7 +20,12 @@
       "Bash(./tools/wal_reader:*)",
       "Bash(LD_PRELOAD=/usr/lib/libasan.so ./tools/wal_reader:*)",
       "Bash(echo:*)",
-      "Bash(LD_PRELOAD=/usr/lib/libasan.so ./tools/wal_maker:*)"
+      "Bash(LD_PRELOAD=/usr/lib/libasan.so ./tools/wal_maker:*)",
+      "Bash(./wal_maker:*)",
+      "Bash(./wal_reader:*)",
+      "Bash(/home/kaiwu/Documents/gitea/openmatch/build/wal_maker:*)",
+      "Bash(/home/kaiwu/Documents/gitea/openmatch/build/wal_reader:*)",
+      "Bash(/home/kaiwu/Documents/gitea/openmatch/build/tools/wal_maker:*)"
     ]
   }
 }

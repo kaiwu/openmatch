@@ -130,7 +130,7 @@ static int wal_query_connect(sqlite3 *db, void *pAux, int argc, const char *cons
     vtab->config.file_index = file_index;
     vtab->config.user_data_size = user_data_size;
     vtab->config.aux_data_size = aux_data_size;
-    vtab->config.enable_crc32 = enable_crc32;
+    vtab->config.disable_crc32 = !enable_crc32;
     vtab->config.buffer_size = 0;
     vtab->config.sync_interval_ms = 0;
     vtab->config.use_direct_io = false;

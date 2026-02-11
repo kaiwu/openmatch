@@ -44,7 +44,7 @@ START_TEST(test_wal_basic_write_recovery)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = TEST_USER_DATA_SIZE,
         .aux_data_size = TEST_AUX_DATA_SIZE
     };
@@ -129,7 +129,7 @@ START_TEST(test_wal_replay_multifile)
         .buffer_size = 4096,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = 0,
         .aux_data_size = 0,
         .wal_max_file_size = 200
@@ -197,7 +197,7 @@ START_TEST(test_wal_sequence_recovery)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = 32,
         .aux_data_size = 64
     };
@@ -268,7 +268,7 @@ START_TEST(test_wal_crc32_validation)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = true,
+        .enable_crc32 = true, /* explicit, same as default */
         .user_data_size = 32,
         .aux_data_size = 64
     };
@@ -339,7 +339,7 @@ START_TEST(test_wal_crc32_mismatch)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = true,
+        .enable_crc32 = true, /* explicit, same as default */
         .user_data_size = 32,
         .aux_data_size = 64
     };
@@ -408,7 +408,7 @@ START_TEST(test_wal_match_replay)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = true,
+        .enable_crc32 = true, /* explicit, same as default */
         .user_data_size = 0,
         .aux_data_size = 0
     };
@@ -473,7 +473,7 @@ START_TEST(test_wal_match_recovery_from_engine)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = 32,
         .aux_data_size = 64
     };
@@ -549,7 +549,7 @@ START_TEST(test_wal_deactivate_activate_recovery)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = 32,
         .aux_data_size = 64
     };
@@ -618,7 +618,7 @@ START_TEST(test_wal_custom_record_replay)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = 0,
         .aux_data_size = 0
     };
@@ -669,7 +669,7 @@ START_TEST(test_wal_aux_data_persistence)
         .buffer_size = 256 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = 32,
         .aux_data_size = 64
     };
@@ -759,7 +759,7 @@ START_TEST(test_wal_timestamp_populated)
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = 32,
         .aux_data_size = 64
     };

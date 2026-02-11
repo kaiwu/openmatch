@@ -140,8 +140,9 @@ static uint64_t wal_scan_for_last_sequence(const char *filename, const OmWalConf
             }
         }
 
-        OmWalHeader *hdr = (OmWalHeader *)(buf + pos);
-        uint64_t packed = hdr->seq_type_len;
+        OmWalHeader hdr;
+        memcpy(&hdr, buf + pos, sizeof(hdr));
+        uint64_t packed = hdr.seq_type_len;
         uint64_t seq = om_wal_header_seq(packed);
         uint8_t type = om_wal_header_type(packed);
         uint16_t payload_len = om_wal_header_len(packed);
@@ -213,6 +214,11 @@ int om_wal_init(OmWal *wal, const OmWalConfig *config) {
     wal->config = *config;
     wal->slab = NULL;
 
+    /* CRC32 on by default unless explicitly opted out */
+    if (!wal->config.disable_crc32) {
+        wal->config.enable_crc32 = true;
+    }
+
     if (wal->config.buffer_size == 0) {
         wal->config.buffer_size = 1024 * 1024;
     }
@@ -243,7 +249,7 @@ int om_wal_init(OmWal *wal, const OmWalConfig *config) {
     if (fstat(wal->fd, &st) == 0) {
         wal->file_offset = st.st_size;
         if (st.st_size > 0) {
-            uint64_t last_seq = wal_scan_for_last_sequence(config->filename, config);
+            uint64_t last_seq = wal_scan_for_last_sequence(config->filename, &wal->config);
             wal->sequence = (last_seq > 0) ? last_seq + 1 : 1;
         } else {
             wal->sequence = 1;
@@ -570,6 +576,7 @@ int om_wal_replay_init(OmWalReplay *replay, const char *filename) {
     replay->last_sequence = 0;
     replay->eof = false;
     replay->filename_pattern = NULL;
+    replay->enable_crc32 = true;  /* CRC on by default */
 
     return 0;
 }
@@ -621,7 +628,7 @@ int om_wal_replay_init_with_config(OmWalReplay *replay, const char *filename,
 
     replay->user_data_size = config->user_data_size;
     replay->aux_data_size = config->aux_data_size;
-    replay->enable_crc32 = config->enable_crc32;
+    replay->enable_crc32 = !config->disable_crc32;
     return 0;
 }
 
@@ -802,13 +809,15 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
             uint32_t computed_crc = crc32_compute(record_start, sizeof(OmWalHeader) + *data_len);
             replay->last_stored_crc = stored_crc;
             replay->last_computed_crc = computed_crc;
+            replay->buffer_pos += *data_len + crc_size;
+            replay->last_sequence = *sequence;
             if (stored_crc != computed_crc) {
                 return OM_ERR_WAL_CRC_MISMATCH;
             }
+        } else {
+            replay->buffer_pos += *data_len;
+            replay->last_sequence = *sequence;
         }
-
-        replay->buffer_pos += *data_len + crc_size;
-        replay->last_sequence = *sequence;
 
             return 1;
         } else {
@@ -832,13 +841,15 @@ int om_wal_replay_next(OmWalReplay *replay, OmWalType *type, void **data,
             uint32_t computed_crc = crc32_compute(record_start, sizeof(OmWalHeader) + *data_len);
             replay->last_stored_crc = stored_crc;
             replay->last_computed_crc = computed_crc;
+            replay->buffer_pos += *data_len + crc_size;
+            replay->last_sequence = *sequence;
             if (stored_crc != computed_crc) {
                 return OM_ERR_WAL_CRC_MISMATCH;
             }
+        } else {
+            replay->buffer_pos += *data_len;
+            replay->last_sequence = *sequence;
         }
-
-        replay->buffer_pos += *data_len + crc_size;
-        replay->last_sequence = *sequence;
 
         if (*type >= OM_WAL_USER_BASE && replay->user_handler) {
             int ret = replay->user_handler(*type, *data, *data_len, replay->user_ctx);

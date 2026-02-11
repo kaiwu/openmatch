@@ -428,7 +428,7 @@ static void init_test_engine(OmEngine *engine, const char *wal_path) {
         .buffer_size = 64 * 1024,
         .sync_interval_ms = 0,
         .use_direct_io = false,
-        .enable_crc32 = false,
+        /* CRC32 enabled by default */
         .user_data_size = 0,
         .aux_data_size = 0,
     };

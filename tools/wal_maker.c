@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
         .filename = output,
         .buffer_size = 1024 * 1024,
         .use_direct_io = false,
-        .enable_crc32 = enable_crc,
+        .disable_crc32 = !enable_crc,
     };
 
     OmWal wal;

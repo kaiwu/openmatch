@@ -108,7 +108,8 @@ typedef struct OmWalConfig {
     size_t buffer_size;         /* Write buffer size (default 1MB) */
     uint32_t sync_interval_ms;  /* Fsync interval in ms (default 10) */
     bool use_direct_io;         /* Use O_DIRECT (default true) */
-    bool enable_crc32;          /* CRC32 validation (default false for speed) */
+    bool enable_crc32;          /* CRC32 on write (default true) */
+    bool disable_crc32;         /* Explicit opt-out: set true to disable CRC32 */
     
     /* Data sizes - must match slab configuration */
     size_t user_data_size;      /* Size of secondary hot data (from OmSlabConfig.user_data_size) */
