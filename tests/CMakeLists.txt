@@ -21,3 +21,9 @@ add_test(NAME test_runner COMMAND test_runner)
 
 add_executable(bench_market_perf bench_market_perf.c)
 target_link_libraries(bench_market_perf openmatch openmarket Threads::Threads m)
+
+add_executable(bench_bus_perf bench_bus_perf.c)
+target_link_libraries(bench_bus_perf ombus Threads::Threads m)
+if(NOT APPLE)
+    target_link_libraries(bench_bus_perf rt)
+endif()

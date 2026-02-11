@@ -5,6 +5,9 @@ distributes WAL record streams across process and machine boundaries.
 
 **Status**: Implemented (SHM + TCP transports)
 
+For performance planning and optimization roadmap, see
+[`docs/perf_message_bus.md`](perf_message_bus.md).
+
 ## 1. Overview & Goals
 
 OpenMatch distributes WAL records via two transports in `libombus`:

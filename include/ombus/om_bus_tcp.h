@@ -69,6 +69,10 @@ int om_bus_tcp_server_create(OmBusTcpServer **out, const OmBusTcpServerConfig *c
 int om_bus_tcp_server_broadcast(OmBusTcpServer *srv, uint64_t wal_seq,
                                 uint8_t wal_type, const void *payload, uint16_t len);
 
+int om_bus_tcp_server_broadcast_batch(OmBusTcpServer *srv,
+                                      const OmBusRecord *recs,
+                                      uint32_t count);
+
 /**
  * Drive I/O: accept connections, flush send buffers, detect disconnects.
  * Non-blocking (poll with timeout=0).

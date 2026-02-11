@@ -350,13 +350,13 @@ int om_bus_stream_publish_batch(OmBusStream *stream, const OmBusRecord *recs,
     }
 
     uint64_t head = atomic_load_explicit(&stream->hdr->head, memory_order_relaxed);
+    uint32_t i = 0;
 
-    for (uint32_t i = 0; i < count; i++) {
-        /* Backpressure: phased spin */
+    while (i < count) {
+        uint64_t mt = 0;
         uint32_t pressure_spins = 0;
         while (1) {
-            uint64_t mt = atomic_load_explicit(&stream->hdr->min_tail,
-                                                memory_order_acquire);
+            mt = atomic_load_explicit(&stream->hdr->min_tail, memory_order_acquire);
             if ((head - mt) < stream->capacity) break;
             if ((pressure_spins & 31U) == 0U) {
                 mt = _om_bus_min_tail_live(stream->tails, stream->max_consumers,
@@ -377,25 +377,35 @@ int om_bus_stream_publish_batch(OmBusStream *stream, const OmBusRecord *recs,
             pressure_spins++;
         }
 
-        uint64_t idx = head & stream->mask;
-        OmBusSlotHeader *slot = (OmBusSlotHeader *)_om_bus_slot(
-            stream->map, stream->max_consumers, stream->slot_size, idx);
-
-        char *payload_dst = (char *)slot + OM_BUS_SLOT_HEADER_SIZE;
-        if (recs[i].payload && recs[i].payload_len > 0) {
-            memcpy(payload_dst, recs[i].payload, recs[i].payload_len);
+        uint64_t available = stream->capacity - (head - mt);
+        uint32_t chunk = count - i;
+        if ((uint64_t)chunk > available) {
+            chunk = (uint32_t)available;
         }
 
-        slot->wal_seq = recs[i].wal_seq;
-        slot->wal_type = recs[i].wal_type;
-        slot->reserved = 0;
-        slot->payload_len = recs[i].payload_len;
-        slot->crc32 = (stream->flags & OM_BUS_FLAG_CRC)
-            ? _om_bus_crc32(recs[i].payload, recs[i].payload_len) : 0;
+        for (uint32_t j = 0; j < chunk; j++) {
+            uint64_t idx = head & stream->mask;
+            OmBusSlotHeader *slot = (OmBusSlotHeader *)_om_bus_slot(
+                stream->map, stream->max_consumers, stream->slot_size, idx);
+            const OmBusRecord *rec = &recs[i + j];
 
-        /* Per-slot seq fence for consumers */
-        atomic_store_explicit(&slot->seq, head + 1U, memory_order_release);
-        head++;
+            char *payload_dst = (char *)slot + OM_BUS_SLOT_HEADER_SIZE;
+            if (rec->payload && rec->payload_len > 0) {
+                memcpy(payload_dst, rec->payload, rec->payload_len);
+            }
+
+            slot->wal_seq = rec->wal_seq;
+            slot->wal_type = rec->wal_type;
+            slot->reserved = 0;
+            slot->payload_len = rec->payload_len;
+            slot->crc32 = (stream->flags & OM_BUS_FLAG_CRC)
+                ? _om_bus_crc32(rec->payload, rec->payload_len) : 0;
+
+            atomic_store_explicit(&slot->seq, head + 1U, memory_order_release);
+            head++;
+        }
+
+        i += chunk;
     }
 
     /* Single head advancement for the batch */

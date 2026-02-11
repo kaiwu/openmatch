@@ -213,9 +213,46 @@ static void _server_close_client(OmBusTcpServer *srv, uint32_t idx) {
     srv->stats_clients_disconnected++;
 }
 
-int om_bus_tcp_server_broadcast(OmBusTcpServer *srv, uint64_t wal_seq,
-                                 uint8_t wal_type, const void *payload, uint16_t len) {
-    if (!srv) return OM_ERR_BUS_INIT;
+static void _server_append_frame(OmBusTcpServer *srv,
+                                 OmBusTcpClientSlot *slot,
+                                 uint64_t wal_seq,
+                                 uint8_t wal_type,
+                                 const void *payload,
+                                 uint16_t len) {
+    uint32_t frame_size = OM_BUS_TCP_FRAME_HEADER_SIZE + len;
+
+    if (slot->send_used + frame_size > slot->send_buf_size) {
+        uint32_t pending = slot->send_used - slot->send_offset;
+        if (slot->send_offset > 0 && pending > 0) {
+            memmove(slot->send_buf, slot->send_buf + slot->send_offset, pending);
+        }
+        slot->send_used = pending;
+        slot->send_offset = 0;
+    }
+
+    if (slot->send_used + frame_size > slot->send_buf_size) {
+        uint32_t warn_size = OM_BUS_TCP_FRAME_HEADER_SIZE + 8;
+        if (slot->send_used + warn_size <= slot->send_buf_size) {
+            OmBusTcpFrameHeader whdr;
+            whdr.magic = OM_BUS_TCP_FRAME_MAGIC;
+            whdr.wal_type = OM_BUS_TCP_WAL_TYPE_SLOW_WARNING;
+            whdr.flags = 0;
+            whdr.payload_len = 8;
+            whdr.wal_seq = 0;
+            memcpy(slot->send_buf + slot->send_used, &whdr, OM_BUS_TCP_FRAME_HEADER_SIZE);
+            uint32_t warn_payload[2] = {
+                slot->send_used - slot->send_offset,
+                slot->send_buf_size,
+            };
+            memcpy(slot->send_buf + slot->send_used + OM_BUS_TCP_FRAME_HEADER_SIZE,
+                   warn_payload,
+                   8);
+            slot->send_used += warn_size;
+        }
+        slot->disconnect_pending = true;
+        srv->stats_slow_client_drops++;
+        return;
+    }
 
     OmBusTcpFrameHeader hdr;
     hdr.magic = OM_BUS_TCP_FRAME_MAGIC;
@@ -224,63 +261,63 @@ int om_bus_tcp_server_broadcast(OmBusTcpServer *srv, uint64_t wal_seq,
     hdr.payload_len = len;
     hdr.wal_seq = wal_seq;
 
-    uint32_t frame_size = OM_BUS_TCP_FRAME_HEADER_SIZE + len;
+    memcpy(slot->send_buf + slot->send_used, &hdr, OM_BUS_TCP_FRAME_HEADER_SIZE);
+    if (len > 0 && payload) {
+        memcpy(slot->send_buf + slot->send_used + OM_BUS_TCP_FRAME_HEADER_SIZE, payload, len);
+    }
+    slot->send_used += frame_size;
+}
+
+int om_bus_tcp_server_broadcast(OmBusTcpServer *srv, uint64_t wal_seq,
+                                 uint8_t wal_type, const void *payload, uint16_t len) {
+    if (!srv) return OM_ERR_BUS_INIT;
 
     for (uint32_t i = 0; i < srv->max_clients; i++) {
         OmBusTcpClientSlot *slot = &srv->clients[i];
         if (slot->fd < 0 || slot->disconnect_pending) continue;
-
-        /* Fast path: frame fits at tail without compaction */
-        if (slot->send_used + frame_size <= slot->send_buf_size) {
-            goto append;
-        }
-
-        /* Slow path: compact unsent data to front, then retry */
-        {
-            uint32_t pending = slot->send_used - slot->send_offset;
-            if (slot->send_offset > 0 && pending > 0) {
-                memmove(slot->send_buf, slot->send_buf + slot->send_offset, pending);
-            }
-            slot->send_used = pending;
-            slot->send_offset = 0;
-        }
-
-        /* Check again after compaction */
-        if (slot->send_used + frame_size > slot->send_buf_size) {
-            /* Try to inject a slow-client warning frame (24 bytes) */
-            uint32_t warn_size = OM_BUS_TCP_FRAME_HEADER_SIZE + 8;
-            if (slot->send_used + warn_size <= slot->send_buf_size) {
-                OmBusTcpFrameHeader whdr;
-                whdr.magic = OM_BUS_TCP_FRAME_MAGIC;
-                whdr.wal_type = OM_BUS_TCP_WAL_TYPE_SLOW_WARNING;
-                whdr.flags = 0;
-                whdr.payload_len = 8;
-                whdr.wal_seq = 0;
-                memcpy(slot->send_buf + slot->send_used, &whdr,
-                       OM_BUS_TCP_FRAME_HEADER_SIZE);
-                uint32_t warn_payload[2] = {
-                    slot->send_used - slot->send_offset, /* bytes pending */
-                    slot->send_buf_size,                  /* buf capacity */
-                };
-                memcpy(slot->send_buf + slot->send_used +
-                       OM_BUS_TCP_FRAME_HEADER_SIZE, warn_payload, 8);
-                slot->send_used += warn_size;
-            }
-            slot->disconnect_pending = true;
-            srv->stats_slow_client_drops++;
-            continue;
-        }
-
-    append:
-        /* Append frame */
-        memcpy(slot->send_buf + slot->send_used, &hdr, OM_BUS_TCP_FRAME_HEADER_SIZE);
-        if (len > 0 && payload)
-            memcpy(slot->send_buf + slot->send_used + OM_BUS_TCP_FRAME_HEADER_SIZE, payload, len);
-        slot->send_used += frame_size;
+        _server_append_frame(srv, slot, wal_seq, wal_type, payload, len);
     }
 
     srv->stats_records_broadcast++;
     srv->stats_bytes_broadcast += len;
+    return 0;
+}
+
+int om_bus_tcp_server_broadcast_batch(OmBusTcpServer *srv,
+                                      const OmBusRecord *recs,
+                                      uint32_t count) {
+    if (!srv || (!recs && count > 0)) {
+        return OM_ERR_BUS_INIT;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    uint64_t bytes = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        bytes += recs[i].payload_len;
+    }
+
+    for (uint32_t c = 0; c < srv->max_clients; c++) {
+        OmBusTcpClientSlot *slot = &srv->clients[c];
+        if (slot->fd < 0 || slot->disconnect_pending) {
+            continue;
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            if (slot->disconnect_pending) {
+                break;
+            }
+            _server_append_frame(srv,
+                                 slot,
+                                 recs[i].wal_seq,
+                                 recs[i].wal_type,
+                                 recs[i].payload,
+                                 recs[i].payload_len);
+        }
+    }
+
+    srv->stats_records_broadcast += count;
+    srv->stats_bytes_broadcast += bytes;
     return 0;
 }
 
@@ -345,6 +382,11 @@ int om_bus_tcp_server_poll_io(OmBusTcpServer *srv) {
             OmBusTcpClientSlot *slot = &srv->clients[slot_idx];
             slot->fd = cfd;
             slot->send_buf = malloc(srv->send_buf_size);
+            if (!slot->send_buf) {
+                close(cfd);
+                slot->fd = -1;
+                continue;
+            }
             slot->send_buf_size = srv->send_buf_size;
             slot->send_used = 0;
             slot->send_offset = 0;

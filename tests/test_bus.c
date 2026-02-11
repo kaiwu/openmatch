@@ -857,6 +857,52 @@ START_TEST(test_tcp_batch_broadcast) {
 }
 END_TEST
 
+START_TEST(test_tcp_broadcast_batch_api) {
+    OmBusTcpServer *srv = tcp_test_server(0, 0);
+    uint16_t port = om_bus_tcp_server_port(srv);
+    OmBusTcpClient *client = tcp_test_client(port, 0);
+
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    uint32_t payloads[64];
+    OmBusRecord recs[64];
+    for (int i = 0; i < 64; i++) {
+        payloads[i] = (uint32_t)(i * 3);
+        recs[i].wal_seq = (uint64_t)(i + 1);
+        recs[i].wal_type = 2;
+        recs[i].payload = &payloads[i];
+        recs[i].payload_len = sizeof(uint32_t);
+    }
+
+    ck_assert_int_eq(om_bus_tcp_server_broadcast_batch(srv, recs, 64), 0);
+    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+
+    usleep(5000);
+
+    OmBusRecord rec;
+    for (int i = 0; i < 64; i++) {
+        int rc;
+        do {
+            rc = om_bus_tcp_client_poll(client, &rec);
+            if (rc == 0) usleep(1000);
+        } while (rc == 0);
+        ck_assert_int_eq(rc, 1);
+        ck_assert_uint_eq(rec.wal_seq, (uint64_t)(i + 1));
+        ck_assert_uint_eq(rec.wal_type, 2);
+        uint32_t out;
+        memcpy(&out, rec.payload, sizeof(out));
+        ck_assert_uint_eq(out, (uint32_t)(i * 3));
+    }
+
+    OmBusTcpServerStats stats;
+    om_bus_tcp_server_stats(srv, &stats);
+    ck_assert_uint_eq(stats.records_broadcast, 64);
+
+    om_bus_tcp_client_close(client);
+    om_bus_tcp_server_destroy(srv);
+}
+END_TEST
+
 /* ---- Test: slow client (send buffer overflow -> disconnect) ---- */
 START_TEST(test_tcp_slow_client) {
     /* Tiny send buffer: 64 bytes — a single 16+16=32 byte frame fits, but not many */
@@ -2130,6 +2176,7 @@ Suite *bus_suite(void) {
     tcase_add_test(tc_tcp, test_tcp_connect_disconnect);
     tcase_add_test(tc_tcp, test_tcp_single_record);
     tcase_add_test(tc_tcp, test_tcp_batch_broadcast);
+    tcase_add_test(tc_tcp, test_tcp_broadcast_batch_api);
     tcase_add_test(tc_tcp, test_tcp_slow_client);
     tcase_add_test(tc_tcp, test_tcp_gap_detection);
     tcase_add_test(tc_tcp, test_tcp_multi_client);
