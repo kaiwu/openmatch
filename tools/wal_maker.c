@@ -4,12 +4,45 @@
 #include <stdbool.h>
 #include <string.h>
 #include <inttypes.h>
+#include <errno.h>
+#include <limits.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
 #include "openmatch/om_wal.h"
 #include "openmatch/om_slab.h"
 #include "openmatch/orderbook.h"
+
+static bool parse_int_in_range(const char *s, int min_v, int max_v, int *out) {
+    if (!s || !out) {
+        return false;
+    }
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0') {
+        return false;
+    }
+    if (v < (long)min_v || v > (long)max_v) {
+        return false;
+    }
+    *out = (int)v;
+    return true;
+}
+
+static bool parse_u64_str(const char *s, uint64_t *out) {
+    if (!s || !out) {
+        return false;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0') {
+        return false;
+    }
+    *out = (uint64_t)v;
+    return true;
+}
 
 /* Simple xorshift64 PRNG — fast, portable, no library dependency */
 static uint64_t rng_state = 0;
@@ -121,15 +154,13 @@ int main(int argc, char **argv) {
     while ((opt = getopt(argc, argv, "n:e:Cp:S:")) != -1) {
         switch (opt) {
             case 'n':
-                n_records = atoi(optarg);
-                if (n_records <= 0) {
+                if (!parse_int_in_range(optarg, 1, INT_MAX - 1, &n_records)) {
                     fprintf(stderr, "invalid -n: %s\n", optarg);
                     return 2;
                 }
                 break;
             case 'e':
-                n_corrupt = atoi(optarg);
-                if (n_corrupt < 0) {
+                if (!parse_int_in_range(optarg, 0, INT_MAX, &n_corrupt)) {
                     fprintf(stderr, "invalid -e: %s\n", optarg);
                     return 2;
                 }
@@ -138,14 +169,16 @@ int main(int argc, char **argv) {
                 disable_crc = true;
                 break;
             case 'p':
-                n_products = atoi(optarg);
-                if (n_products <= 0) {
+                if (!parse_int_in_range(optarg, 1, UINT16_MAX, &n_products)) {
                     fprintf(stderr, "invalid -p: %s\n", optarg);
                     return 2;
                 }
                 break;
             case 'S':
-                seed = strtoull(optarg, NULL, 10);
+                if (!parse_u64_str(optarg, &seed)) {
+                    fprintf(stderr, "invalid -S: %s\n", optarg);
+                    return 2;
+                }
                 seed_set = true;
                 break;
             default:
@@ -202,7 +235,16 @@ int main(int argc, char **argv) {
     uint32_t *live_oids = calloc((size_t)n_records, sizeof(uint32_t));
     uint16_t *live_pids = calloc((size_t)n_records, sizeof(uint16_t));
     uint32_t *live_slots = calloc((size_t)n_records, sizeof(uint32_t));
-    int n_live = 0;
+    if (!live_oids || !live_pids || !live_slots) {
+        fprintf(stderr, "failed to allocate live order arrays\n");
+        free(live_oids);
+        free(live_pids);
+        free(live_slots);
+        om_orderbook_destroy(&ctx);
+        om_wal_close(&wal);
+        return 1;
+    }
+    size_t n_live = 0;
 
     int counts[6] = {0}; /* INSERT, CANCEL, MATCH, DEACTIVATE, ACTIVATE, other */
 
@@ -232,7 +274,7 @@ int main(int argc, char **argv) {
             counts[0]++;
         } else if (roll < 65 && n_live > 0) {
             /* CANCEL */
-            int idx = (int)(rng_next() % (uint64_t)n_live);
+            size_t idx = (size_t)(rng_next() % (uint64_t)n_live);
             om_wal_cancel(&wal, live_oids[idx], live_slots[idx], live_pids[idx]);
             live_oids[idx] = live_oids[n_live - 1];
             live_pids[idx] = live_pids[n_live - 1];
@@ -241,8 +283,8 @@ int main(int argc, char **argv) {
             counts[1]++;
         } else if (roll < 80 && n_live >= 2) {
             /* MATCH */
-            int m = (int)(rng_next() % (uint64_t)n_live);
-            int t = (int)(rng_next() % (uint64_t)n_live);
+            size_t m = (size_t)(rng_next() % (uint64_t)n_live);
+            size_t t = (size_t)(rng_next() % (uint64_t)n_live);
             if (t == m) t = (t + 1) % n_live;
             OmWalMatch match = {
                 .maker_id = live_oids[m],
@@ -255,12 +297,12 @@ int main(int argc, char **argv) {
             counts[2]++;
         } else if (roll < 90 && n_live > 0) {
             /* DEACTIVATE */
-            int idx = (int)(rng_next() % (uint64_t)n_live);
+            size_t idx = (size_t)(rng_next() % (uint64_t)n_live);
             om_wal_deactivate(&wal, live_oids[idx], live_slots[idx], live_pids[idx]);
             counts[3]++;
         } else if (n_live > 0) {
             /* ACTIVATE */
-            int idx = (int)(rng_next() % (uint64_t)n_live);
+            size_t idx = (size_t)(rng_next() % (uint64_t)n_live);
             om_wal_activate(&wal, live_oids[idx], live_slots[idx], live_pids[idx]);
             counts[4]++;
         } else {

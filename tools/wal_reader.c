@@ -3,6 +3,8 @@
 #include <inttypes.h>
 #include <string.h>
 #include <stdbool.h>
+#include <errno.h>
+#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 #include "openmatch/om_wal.h"
@@ -129,17 +131,41 @@ static void print_activate(FILE *out, const OmWalActivate *rec, bool format_ts) 
 }
 
 /* Parse "from-to" sequence range, e.g. "100-200" */
+static bool parse_u64_token(const char *s, size_t len, uint64_t *out) {
+    if (!s || !out || len == 0 || len >= 32) {
+        return false;
+    }
+    char buf[32];
+    memcpy(buf, s, len);
+    buf[len] = '\0';
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(buf, &end, 10);
+    if (errno != 0 || end == buf || *end != '\0') {
+        return false;
+    }
+    *out = (uint64_t)v;
+    return true;
+}
+
 static bool parse_seq_range(const char *arg, SeqRange *r) {
     char *dash = strchr(arg, '-');
     if (!dash || dash == arg) return false;
-    r->from = strtoull(arg, NULL, 10);
-    r->to = strtoull(dash + 1, NULL, 10);
+    size_t left_len = (size_t)(dash - arg);
+    size_t right_len = strlen(dash + 1);
+    if (!parse_u64_token(arg, left_len, &r->from)) {
+        return false;
+    }
+    if (!parse_u64_token(dash + 1, right_len, &r->to)) {
+        return false;
+    }
     return r->from <= r->to;
 }
 
 /* Parse YYYYMMDDHHMMSS string to nanoseconds since epoch */
-static uint64_t parse_time_str(const char *str, size_t len) {
-    if (len != 14) return 0;
+static bool parse_time_str(const char *str, size_t len, uint64_t *out_ns) {
+    if (len != 14 || !out_ns) return false;
     char buf[15];
     memcpy(buf, str, 14);
     buf[14] = '\0';
@@ -151,14 +177,39 @@ static uint64_t parse_time_str(const char *str, size_t len) {
     n = sscanf(buf, "%4d%2d%2d%2d%2d%2d",
                &tm_val.tm_year, &tm_val.tm_mon, &tm_val.tm_mday,
                &tm_val.tm_hour, &tm_val.tm_min, &tm_val.tm_sec);
-    if (n != 6) return 0;
+    if (n != 6) return false;
+    int year = tm_val.tm_year;
+    int mon = tm_val.tm_mon;
+    int mday = tm_val.tm_mday;
+    int hour = tm_val.tm_hour;
+    int min = tm_val.tm_min;
+    int sec = tm_val.tm_sec;
+    if (mon < 1 || mon > 12 || mday < 1 || mday > 31 ||
+        hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 59) {
+        return false;
+    }
     tm_val.tm_year -= 1900;
     tm_val.tm_mon -= 1;
     tm_val.tm_isdst = -1;
 
     time_t t = mktime(&tm_val);
-    if (t == (time_t)-1) return 0;
-    return (uint64_t)t * 1000000000ULL;
+    if (t == (time_t)-1) return false;
+
+    struct tm check_tm;
+    if (localtime_r(&t, &check_tm) == NULL) {
+        return false;
+    }
+    if ((check_tm.tm_year + 1900) != year ||
+        (check_tm.tm_mon + 1) != mon ||
+        check_tm.tm_mday != mday ||
+        check_tm.tm_hour != hour ||
+        check_tm.tm_min != min ||
+        check_tm.tm_sec != sec) {
+        return false;
+    }
+
+    *out_ns = (uint64_t)t * 1000000000ULL;
+    return true;
 }
 
 /* Parse "YYYYMMDDHHMMSS-YYYYMMDDHHMMSS" time range */
@@ -167,9 +218,12 @@ static bool parse_time_range(const char *arg, TimeRange *r) {
     if (len != 29) return false;    /* 14 + 1 + 14 */
     if (arg[14] != '-') return false;
 
-    r->from_ns = parse_time_str(arg, 14);
-    r->to_ns = parse_time_str(arg + 15, 14);
-    if (r->from_ns == 0 || r->to_ns == 0) return false;
+    if (!parse_time_str(arg, 14, &r->from_ns)) {
+        return false;
+    }
+    if (!parse_time_str(arg + 15, 14, &r->to_ns)) {
+        return false;
+    }
     /* Inclusive: extend to_ns to end of that second */
     r->to_ns += 999999999ULL;
     return r->from_ns <= r->to_ns;
@@ -347,6 +401,7 @@ int main(int argc, char **argv) {
     uint64_t rendered = 0;
     uint64_t replayed = 0;
     int exit_code = 0;
+    bool strict_stop = false;
 
     for (int fi = 0; fi < n_files; fi++) {
         const char *wal_path = argv[optind + fi];
@@ -385,6 +440,7 @@ int main(int argc, char **argv) {
                     replay.last_record_offset + 8 + data_len);
                 exit_code = 1;
                 if (strict_crc) {
+                    strict_stop = true;
                     break;
                 }
                 /* Without -c, warn but continue reading */
@@ -454,6 +510,11 @@ int main(int argc, char **argv) {
 
             /* Replay to SHM bus */
             if (stream) {
+                if (data_len > UINT16_MAX) {
+                    fprintf(stderr, "publish skipped seq=%" PRIu64 " (payload too large: %zu)\n",
+                            sequence, data_len);
+                    continue;
+                }
                 int rc = om_bus_stream_publish(stream, sequence, type,
                                                data, (uint16_t)data_len);
                 if (rc != 0) {
@@ -466,6 +527,9 @@ int main(int argc, char **argv) {
         }
 
         om_wal_replay_close(&replay);
+        if (strict_stop) {
+            break;
+        }
     }
 
     if (stream) {

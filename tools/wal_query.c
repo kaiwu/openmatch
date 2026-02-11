@@ -74,6 +74,19 @@ static const char *wal_type_name(OmWalType type) {
     }
 }
 
+static char *dup_trimmed_sql_value(const char *s) {
+    if (!s) {
+        return NULL;
+    }
+    size_t len = strlen(s);
+    if (len >= 2 && ((s[0] == '\'' && s[len - 1] == '\'') ||
+                     (s[0] == '"' && s[len - 1] == '"'))) {
+        s++;
+        len -= 2;
+    }
+    return sqlite3_mprintf("%.*s", (int)len, s);
+}
+
 static int wal_query_disconnect(sqlite3_vtab *pVtab) {
     WalQueryVtab *vtab = (WalQueryVtab *)pVtab;
     if (vtab) {
@@ -132,8 +145,8 @@ static int wal_query_connect(sqlite3 *db, void *pAux, int argc, const char *cons
     }
     memset(vtab, 0, sizeof(WalQueryVtab));
 
-    vtab->filename = filename ? sqlite3_mprintf("%s", filename) : NULL;
-    vtab->pattern = pattern ? sqlite3_mprintf("%s", pattern) : NULL;
+    vtab->filename = dup_trimmed_sql_value(filename);
+    vtab->pattern = dup_trimmed_sql_value(pattern);
     vtab->config.filename = vtab->filename ? vtab->filename : "";
     vtab->config.filename_pattern = vtab->pattern;
     vtab->config.file_index = file_index;
@@ -235,8 +248,13 @@ static int wal_query_next(sqlite3_vtab_cursor *cur) {
             cursor->computed_crc = cursor->replay.last_computed_crc;
             cursor->crc_ok = false;
         } else {
-            cursor->stored_crc = cursor->replay.last_computed_crc;
-            cursor->computed_crc = cursor->replay.last_computed_crc;
+            if (cursor->replay.enable_crc32) {
+                cursor->stored_crc = cursor->replay.last_stored_crc;
+                cursor->computed_crc = cursor->replay.last_computed_crc;
+            } else {
+                cursor->stored_crc = 0;
+                cursor->computed_crc = 0;
+            }
             cursor->crc_ok = true;
         }
 
