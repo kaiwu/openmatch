@@ -1,5 +1,6 @@
 #include "ombus/om_bus.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
 #include <stdlib.h>
@@ -30,6 +31,15 @@ static inline uint64_t _om_bus_monotonic_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
+
+#ifdef OM_BUS_ENABLE_ERRNO_FALLBACK
+static bool _om_bus_ftruncate_fallback_ok(int err, size_t current_size, size_t required_size) {
+    if (current_size < required_size) {
+        return false;
+    }
+    return err == EBUSY || err == EINVAL || err == EACCES || err == EPERM;
+}
+#endif
 
 /* CRC32C (Castagnoli polynomial: 0x82F63B78)
  * Hardware-accelerated on x86 (SSE4.2) and ARM (CRC extension).
@@ -197,15 +207,33 @@ int om_bus_stream_create(OmBusStream **out, const OmBusStreamConfig *config) {
 
     size_t total = _om_bus_shm_size(capacity, slot_size, max_consumers);
 
-    /* Create SHM object */
-    int fd = shm_open(config->stream_name, O_CREAT | O_RDWR | O_TRUNC, 0600);
+    int fd = shm_open(config->stream_name, O_CREAT | O_RDWR, 0600);
     if (fd < 0) {
         return OM_ERR_BUS_SHM_CREATE;
     }
-    if (ftruncate(fd, (off_t)total) != 0) {
+
+    struct stat st;
+    bool needs_resize = true;
+    if (fstat(fd, &st) == 0) {
+        needs_resize = ((size_t)st.st_size < total);
+    }
+
+    if (needs_resize && ftruncate(fd, (off_t)total) != 0) {
+#ifdef OM_BUS_ENABLE_ERRNO_FALLBACK
+        int trunc_errno = errno;
+        struct stat post_trunc_st;
+        bool have_post_size = (fstat(fd, &post_trunc_st) == 0);
+        size_t post_size = have_post_size ? (size_t)post_trunc_st.st_size : 0U;
+        if (!_om_bus_ftruncate_fallback_ok(trunc_errno, post_size, total)) {
+            close(fd);
+            shm_unlink(config->stream_name);
+            return OM_ERR_BUS_SHM_CREATE;
+        }
+#else
         close(fd);
         shm_unlink(config->stream_name);
         return OM_ERR_BUS_SHM_CREATE;
+#endif
     }
 
     void *map = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);

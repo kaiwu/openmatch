@@ -780,7 +780,13 @@ START_TEST(test_tcp_connect_disconnect) {
     om_bus_tcp_client_close(client);
 
     /* Server detects disconnect */
-    ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+    for (int i = 0; i < 20 && om_bus_tcp_server_client_count(srv) != 0; i++) {
+        ck_assert_int_eq(om_bus_tcp_server_poll_io(srv), 0);
+        if (om_bus_tcp_server_client_count(srv) == 0) {
+            break;
+        }
+        usleep(1000);
+    }
     ck_assert_uint_eq(om_bus_tcp_server_client_count(srv), 0);
 
     om_bus_tcp_server_destroy(srv);
